@@ -18,9 +18,14 @@ const API_CANDIDATES = [
 const API_TIMEOUT_MS = 10000;
 
 let _resolvedApiBase = null;
+let _resolvedAt = 0;
+const RESOLVE_TTL_MS = 5 * 60 * 1000; // 5 minutos
 
-async function resolveApiBase() {
-    if (_resolvedApiBase) return _resolvedApiBase;
+async function resolveApiBase(forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && _resolvedApiBase && (now - _resolvedAt) < RESOLVE_TTL_MS) {
+        return _resolvedApiBase;
+    }
     for (const base of API_CANDIDATES) {
         try {
             await axiosClient.get(`${base}/searchStats`, {
@@ -28,6 +33,7 @@ async function resolveApiBase() {
                 headers: { "Referer": "https://jurisprudenciatfn.mecon.gob.ar/" }
             });
             _resolvedApiBase = base;
+            _resolvedAt = now;
             process.stderr.write(`[tfn] API activa: ${base}\n`);
             return base;
         } catch {
@@ -35,6 +41,7 @@ async function resolveApiBase() {
         }
     }
     _resolvedApiBase = API_CANDIDATES[0];
+    _resolvedAt = now;
     process.stderr.write(`[tfn] advertencia: ningun candidato respondio, usando ${_resolvedApiBase} como fallback\n`);
     return _resolvedApiBase;
 }
@@ -120,6 +127,11 @@ export async function buscarResoluciones(args) {
         }));
         return { data: normalized, total: normalized.length };
     } catch (err) {
+        const status = err?.response?.status;
+        if (status && status >= 500) {
+            process.stderr.write(`[tfn] error ${status} en buscarResoluciones - invalidando cache de API base\n`);
+            resolveApiBase(true).catch(() => {});
+        }
         console.error("TFN API error:", (err instanceof Error ? err.message : String(err)));
         return {
             data: [],

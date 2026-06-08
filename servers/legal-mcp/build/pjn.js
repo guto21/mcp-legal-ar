@@ -650,6 +650,16 @@ registerAllTools(server);
 registerAllPrompts(server);
 // Connect with stdio (only when run directly and not in Vercel/Next environment)
 if (typeof process !== "undefined" && !process.env.VERCEL && !process.env.NEXT_RUNTIME) {
+    const cleanupBrowser = async () => {
+        if (globalBrowser) {
+            try { await globalBrowser.close(); } catch { /* ignorar */ }
+            globalBrowser = null;
+            globalPage = null;
+        }
+    };
+    process.on("SIGINT",  async () => { await cleanupBrowser(); process.exit(0); });
+    process.on("SIGTERM", async () => { await cleanupBrowser(); process.exit(0); });
+    process.on("exit",    ()       => { if (globalBrowser) { try { globalBrowser.process()?.kill(); } catch { /* ignorar */ } } });
     const transport = new StdioServerTransport();
     server.connect(transport).catch((err) => {
         console.error("Server connection failed", err);

@@ -1,0 +1,6 @@
+{
+  "name": "infoleg-proxy",
+  "main": "worker.js",
+  "compatibility_date": "2024-01-01",
+  "account_id": "687c3ca6fa16233652f15b858b639721"
+}

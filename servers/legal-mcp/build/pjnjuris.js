@@ -11,6 +11,45 @@ const axiosClient = axios.create({ httpsAgent });
 import crypto from "crypto";
 let globalBrowser = null;
 let globalPage = null;
+
+async function pjnJurisQueryWithSession(toolName, params) {
+    if (!globalPage) {
+        return {
+            content: [{
+                type: "text",
+                text: `[ERROR] ${toolName}: el endpoint scw.pjn.gov.ar/scw/api/jurisprudencia no existe como API REST pública. ` +
+                      `El portal PJN requiere sesión de navegador con reCAPTCHA resuelto.\n\n` +
+                      `Para consultar jurisprudencia del PJN:\n` +
+                      `1. Usar iniciar_hitl_browser para abrir el navegador interactivo.\n` +
+                      `2. Navegar a https://scw.pjn.gov.ar/scw/jurisprudencia/\n` +
+                      `3. Resolver el CAPTCHA manualmente.\n` +
+                      `4. Llamar finalizar_hitl_browser para extraer la sesión.\n` +
+                      `5. Reintentar la consulta.\n\n` +
+                      `Alternativas sin CAPTCHA: juba (SCBA), saij_search_jurisprudencia (SAIJ federal).`
+            }],
+            isError: true
+        };
+    }
+    try {
+        const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
+        await globalPage.goto(targetUrl, { waitUntil: "networkidle2" });
+        const result = await globalPage.evaluate(async (url, body) => {
+            const res = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            return res.json();
+        }, targetUrl, params);
+        return { data: result };
+    } catch (err) {
+        return {
+            content: [{ type: "text", text: `[ERROR] ${toolName}: ${err.message}` }],
+            isError: true
+        };
+    }
+}
+
 export function registerAllTools(server) {
     // Tool: pjn_buscar_jurisprudencia_por_expediente
     server.tool("pjn_buscar_jurisprudencia_por_expediente", "Busca la jurisprudencia y fallos asociados a un número de expediente específico. Requiere año y número.", {
@@ -20,20 +59,15 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("pjn_buscar_jurisprudencia_por_expediente", {
                 modo: "expediente",
                 numero: args.numero,
                 anio: args.anio,
                 camara_id: args.camara_id,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Jurisprudencia por Expediente\n\n";
             resultText += `**Expediente:** ${args.numero}/${args.anio}\n`;
             if (args.camara_id)
@@ -63,19 +97,14 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("pjn_buscar_jurisprudencia_por_caratula", {
                 modo: "caratula",
                 caratula: args.caratula,
                 camara_id: args.camara_id,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Jurisprudencia por Carátula\n\n";
             resultText += `**Carátula:** ${args.caratula}\n`;
             if (args.camara_id)
@@ -108,8 +137,7 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("pjn_buscar_jurisprudencia_por_fallo", {
                 modo: "fallo",
                 numero_sentencia: args.numero_sentencia,
                 fecha_desde: args.fecha_desde,
@@ -117,13 +145,9 @@ export function registerAllTools(server) {
                 magistrado: args.magistrado,
                 camara_id: args.camara_id,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Jurisprudencia por Fallo\n\n";
             if (args.numero_sentencia)
                 resultText += `**Número Sentencia:** ${args.numero_sentencia}\n`;
@@ -159,8 +183,7 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("pjn_buscar_jurisprudencia_por_texto_corte_suprema", {
                 modo: "texto_csjn",
                 texto_contiene: args.texto_contiene,
                 texto_no_contiene: args.texto_no_contiene,
@@ -169,13 +192,9 @@ export function registerAllTools(server) {
                 fecha_hasta: args.fecha_hasta,
                 camara_id: "CSJN",
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Jurisprudencia CSJN por Texto\n\n";
             resultText += `**Texto contiene:** ${args.texto_contiene}\n`;
             if (args.texto_no_contiene)
@@ -211,8 +230,7 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("pjn_buscar_jurisprudencia_por_texto_camaras", {
                 modo: "texto_camaras",
                 texto_contiene: args.texto_contiene,
                 texto_no_contiene: args.texto_no_contiene,
@@ -221,13 +239,9 @@ export function registerAllTools(server) {
                 fecha_desde: args.fecha_desde,
                 fecha_hasta: args.fecha_hasta,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Jurisprudencia Cámaras por Texto\n\n";
             resultText += `**Cámara:** ${args.camara_id}\n`;
             resultText += `**Texto contiene:** ${args.texto_contiene}\n\n`;
@@ -258,21 +272,16 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("pjn_buscar_sumarios", {
                 modo: "sumarios",
                 texto_contiene: args.texto_contiene,
                 camara_id: args.camara_id,
                 fecha_desde: args.fecha_desde,
                 fecha_hasta: args.fecha_hasta,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Búsqueda de Sumarios\n\n";
             resultText += `**Texto contiene:** ${args.texto_contiene}\n`;
             if (args.camara_id)
@@ -319,19 +328,14 @@ export function registerAllTools(server) {
         captchaToken: z.string().describe("Token de reCAPTCHA obligatorio para consultar el portal.")
     }, async (args) => {
         try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("buscar_jurisprudencia_fed", {
                 modo: "texto_camaras",
                 texto_contiene: args.criterio,
                 camara_id: "CNACAF",
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let resultText = "# PJN - Jurisprudencia Contencioso Admin Fed\n\n";
             resultText += `**Búsqueda:** ${args.criterio}\n`;
             resultText += `**Cámara:** CNACAF (Cámara Nacional de Apelaciones en lo Contencioso Administrativo Federal)\n\n`;
@@ -458,7 +462,6 @@ export function registerAllTools(server) {
     }, async (args) => {
         try {
             const text = args.texto_fallo;
-            // Define deadline detection patterns for jurisprudence context
             const patterns = [
                 { regex: /\b\d+\s+(días?\s+(habiles|corridos)?|meses|años?)\b/i, name: "Plazo numérico" },
                 { regex: /\b(plazo|término)\s+de\s+(días?|meses|años?)\b/i, name: "Cláusula de plazo" },
@@ -471,7 +474,6 @@ export function registerAllTools(server) {
                 { regex: /\b(apelar|apelación|recurso)\b/i, name: "Plazo de apelación" },
                 { regex: /\b(consignar|depósito|caución)\b/i, name: "Plazo de consignación" },
             ];
-            // Split text into paragraphs for analysis
             const paragraphs = text.split(/\n\n+/);
             const results = [];
             for (const paragraph of paragraphs) {
@@ -496,10 +498,6 @@ export function registerAllTools(server) {
             content += `Se identificaron **${results.length}** cláusulas con indicadores temporales relevantes.\n\n`;
             if (results.length === 0) {
                 content += `No se detectaron plazos, fechas límite o hitos temporales en el texto analizado.\n`;
-                content += `Esto puede indicar:\n`;
-                content += `- El fallo no contiene plazos temporales\n`;
-                content += `- Los plazos están expresados en formato no detectado por los patrones actuales\n`;
-                content += `- El texto es muy breve o no es legible\n\n`;
             }
             else {
                 content += `## Cláusulas Temporales Detectadas\n\n`;
@@ -508,11 +506,7 @@ export function registerAllTools(server) {
                     content += `> ${r.paragraph}\n\n`;
                 });
             }
-            content += `## Patrones de Búsqueda Utilizados\n`;
-            patterns.forEach((p, idx) => {
-                content += `${idx + 1}. **${p.name}**: ${p.regex.source}\n`;
-            });
-            content += `\n> **Nota:** Esta herramienta detecta patrones de texto comunes en fallos jurisprudenciales. No constituye asesoramiento legal. Verificar siempre los plazos directamente en el documento original del PJN.`;
+            content += `\n> **Nota:** Esta herramienta detecta patrones de texto comunes en fallos jurisprudenciales. No constituye asesoramiento legal.`;
             return {
                 content: [{ type: "text", text: content }],
             };
@@ -525,9 +519,6 @@ export function registerAllTools(server) {
         }
     });
     // Tool: generar_certificacion_forense
-    // [NO IMPLEMENTADO] Requiere descarga real del fallo vía endpoint no público.
-    // La certificación SHA-256 sobre un buffer descargado desde un endpoint inexistente
-    // no tiene valor forense. Se marca como no disponible hasta implementar descarga real.
     server.tool("generar_certificacion_forense", "[NO DISPONIBLE] Requiere acceso a un endpoint de descarga de fallos que el PJN no expone públicamente. La certificación forense sería sobre un documento no descargado.", {
         fallo_id: z.string().describe("ID del fallo a certificar."),
         captchaToken: z.string().describe("Token de reCAPTCHA para acceso al documento.")
@@ -547,21 +538,15 @@ export function registerAllTools(server) {
         try {
             const concepto = args.concepto;
             const terminos = args.terminos_equivalentes || [];
-            // Combine concept with equivalent terms for broader search
             const allTerms = [concepto, ...terminos].join(' ');
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("buscar_por_semantica", {
                 modo: "texto_camaras",
                 texto_contiene: allTerms,
                 camara_id: args.camara_id,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let content = `# Búsqueda Semántica de Jurisprudencia - "${concepto}"\n\n`;
             content += `## Términos de Búsqueda Utilizados\n`;
             content += `- **Concepto principal:** ${concepto}\n`;
@@ -606,21 +591,15 @@ export function registerAllTools(server) {
         try {
             const criterioBase = args.criterio_base;
             const terminosRelacionados = args.terminos_relacionados || [];
-            // Combine base criteria with related terms
             const searchQuery = [criterioBase, ...terminosRelacionados].join(' ');
-            const targetUrl = "https://scw.pjn.gov.ar/scw/api/jurisprudencia";
-            const response = await axiosClient.post(targetUrl, {
+            const result = await pjnJurisQueryWithSession("relacionar_fallos", {
                 modo: "caratula",
                 caratula: searchQuery,
                 camara_id: args.camara_id,
                 captchaToken: args.captchaToken
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (compatible; pjn-juris-mcp/1.0)"
-                }
             });
-            const data = response.data;
+            if (result.isError) return result;
+            const data = result.data;
             let content = `# Fallos Relacionados - "${criterioBase}"\n\n`;
             content += `## Fallo de Referencia\n`;
             content += `- **Criterio base:** ${criterioBase}\n`;
@@ -656,8 +635,6 @@ export function registerAllTools(server) {
         }
     });
     // Tool: exportar_fallo
-    // Exporta metadata + sumario de un fallo obtenido previamente via búsqueda.
-    // No intenta descarga por ID (endpoint no público). Recibe el objeto fallo como argumento.
     server.tool("exportar_fallo", "Exporta la información de un fallo a Markdown con frontmatter YAML (Notion, Obsidian). Requiere pasar los datos del fallo obtenidos previamente con las herramientas de búsqueda.", {
         fallo_id: z.string().describe("Identificador del fallo (para referencia en el frontmatter)."),
         caratula: z.string().optional().describe("Carátula del expediente."),
@@ -696,9 +673,6 @@ export function registerAllTools(server) {
         }
     });
     // Tool: pjn_buscar_guia_judicial
-    // [NO IMPLEMENTADO] El PJN no expone un endpoint REST para la guía judicial.
-    // La guía es una página HTML en https://www.pjn.gov.ar/guia_judicial/ - requiere scraping.
-    // Para consultar: usar iniciar_hitl_browser y navegar manualmente.
     server.tool("pjn_buscar_guia_judicial", "[NO DISPONIBLE] El PJN no expone un endpoint REST para la guía judicial. Para consultar tribunales y personal judicial, usar iniciar_hitl_browser y navegar a https://www.pjn.gov.ar/guia_judicial/", {
         tribunal: z.string().optional().describe("Nombre del tribunal a buscar."),
         fuero: z.enum(["CIVIL", "COMERCIAL", "PENAL", "LABORAL", "CONTENCIOSO_ADMINISTRATIVO", "FEDERAL", "ELECTORAL", "SEGURIDAD_SOCIAL"]).optional().describe("Fuero o rama del derecho."),
@@ -710,7 +684,6 @@ export function registerAllTools(server) {
         };
     });
     // Tool: pjn_consultar_concursos
-    // [NO IMPLEMENTADO] El PJN no expone un endpoint REST para concursos judiciales.
     server.tool("pjn_consultar_concursos", "[NO DISPONIBLE] El PJN no expone un endpoint REST para concursos judiciales. Para consultar concursos vigentes, usar iniciar_hitl_browser y navegar al sitio oficial del PJN.", {
         fuero: z.enum(["CIVIL", "COMERCIAL", "PENAL", "LABORAL", "FEDERAL"]).optional().describe("Fuero del concurso."),
         estado: z.enum(["ABIERTO", "CERRADO", "EN_CURSO", "FINALIZADO"]).optional().describe("Estado del concurso.")
@@ -721,8 +694,6 @@ export function registerAllTools(server) {
         };
     });
     // Tool: pjn_buscar_formularios_csjn
-    // [NO IMPLEMENTADO] Los formularios CSJN (Acordada 12/2020) se publican como PDFs,
-    // no via endpoint REST con filtros por tipo/fuero.
     server.tool("pjn_buscar_formularios_csjn", "[NO DISPONIBLE] Los formularios CSJN (Acordada 12/2020) no se exponen via endpoint REST. Para acceder a los formularios, usar iniciar_hitl_browser y navegar a https://www.csjn.gov.ar", {
         tipo_formulario: z.enum(["DEMANDA", "RECURSO_DIRECTO", "RECURSO_QUEJA", "AMPARO", "HABEAS_CORPUS", "HABEAS_DATA"]).optional().describe("Tipo de formulario."),
         fuero: z.enum(["CIVIL", "COMERCIAL", "PENAL", "CONTENCIOSO_ADMINISTRATIVO", "LABORAL"]).optional().describe("Fuero del formulario.")
@@ -733,8 +704,6 @@ export function registerAllTools(server) {
         };
     });
     // Tool: pjn_estadisticas
-    // [NO IMPLEMENTADO] Las estadisticas del PJN se publican como informes PDF/HTML,
-    // no via endpoint REST con filtros por jurisdiccion y fuero.
     server.tool("pjn_estadisticas", "[NO DISPONIBLE] Las estadisticas del PJN no se exponen via endpoint REST. Para acceder a informes estadisticos, usar iniciar_hitl_browser y navegar a https://www.pjn.gov.ar/estadisticas/", {
         jurisdiccion: z.enum(["CSJ", "CIV", "CAF", "CCF", "CNE", "CSS", "CPE", "CNT", "CFP", "CCC", "COM", "CPF", "CPN", "FBB", "FCR", "FCB", "FCT", "FGR", "FLP", "FMP", "FMZ", "FPO", "FPA", "FRE", "FSA", "FRO", "FSM", "FTU"]).optional().describe("Jurisdiccion."),
         fuero: z.enum(["CIVIL", "COMERCIAL", "PENAL", "LABORAL", "CONTENCIOSO_ADMINISTRATIVO", "FEDERAL"]).optional().describe("Fuero."),
@@ -755,7 +724,6 @@ export const server = new McpServer({
 registerAllTools(server);
 // Connect with stdio (only when run directly and not in Vercel/Next environment)
 if (typeof process !== "undefined" && !process.env.VERCEL && !process.env.NEXT_RUNTIME) {
-    // FIX: cleanup Puppeteer browser on process exit to prevent zombie Chromium
     const cleanupBrowser = async () => {
         if (globalBrowser) {
             try { await globalBrowser.close(); } catch { /* ignorar */ }

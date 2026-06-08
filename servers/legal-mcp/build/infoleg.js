@@ -5,7 +5,6 @@ import { z } from "zod";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import https from "https";
-import { pathToFileURL as _pathToFileURL } from "url";
 import crypto from "crypto";
 
 const httpsAgent = new https.Agent({
@@ -18,6 +17,22 @@ const OFFICIAL_HEADERS = {
     "Cache-Control": "no-cache"
 };
 const ARGENTINA_BASE_URL = "https://www.argentina.gob.ar";
+const GEOBLOCK_MSG =
+    `⚠️ **InfoLEG requiere IP argentina.**\n\n` +
+    `El portal servicios.infoleg.gob.ar restringe el acceso a IPs de Argentina. ` +
+    `Este conector funciona correctamente desde **Claude Desktop instalado en una máquina con IP argentina**.\n\n` +
+    `**Alternativas disponibles:**\n` +
+    `- Usá Claude Desktop localmente desde Argentina.\n` +
+    `- Si tenés el texto de la norma, pegalo en el campo \`textoHtmlManual\` para procesarlo sin conexión al portal.\n` +
+    `- Para consultar manualmente: https://servicios.infoleg.gob.ar/infolegInternet/`;
+
+function isGeoblockError(err) {
+    if (!err) return false;
+    const status = err.response?.status;
+    const body = err.response?.data?.toString() || err.message || "";
+    return status === 403 || body.includes("Host not in allowlist") || body.includes("Prohibido") || body.includes("Forbidden");
+}
+
 // Helper Zod validators
 export const stringOrNumber = z.union([z.string(), z.number()]).transform(val => String(val));
 export const stringOrNumberOptional = z.union([z.string(), z.number()]).transform(val => String(val)).optional();
@@ -261,11 +276,6 @@ async function resolveNormaDetailUrl(args) {
     }
     throw new Error("No se pudo resolver la URL oficial de resumen. Pasa urlNorma o combina tipoNorma/numeroNorma/anioNorma.");
 }
-/**
- * Calculates the static annex directory range for a given InfoLEG ID.
- * InfoLEG splits static documents into folders of 50,000 files each:
- * e.g., ID 296831 falls in the "250000-299999" folder.
- */
 export function getInfoLegRange(idStr) {
     const idNum = parseInt(idStr, 10);
     if (isNaN(idNum) || idNum < 0) {
@@ -275,25 +285,16 @@ export function getInfoLegRange(idStr) {
     const ceilLimit = floorLimit + 49999;
     return `${floorLimit}-${ceilLimit}`;
 }
-/**
- * Builds the static HTML URL for direct document extraction.
- */
 export function getInfoLegStaticUrl(idStr, tipoTexto = "actualizado") {
     const range = getInfoLegRange(idStr);
     const file = tipoTexto === "actualizado" ? "texact.htm" : "norma.htm";
     return `https://servicios.infoleg.gob.ar/infolegInternet/anexos/${range}/${idStr}/${file}`;
 }
-/**
- * Cleans and converts InfoLEG static HTML content into structured Markdown.
- */
 export function cleanInfoLegHtml(html) {
     const $ = cheerio.load(html);
-    // Remove scripts, styles, iframes, inputs
     $("script, style, iframe, input, select, textarea, button, link").remove();
-    // Remove header banner images or top navigations if present
     $("img").remove();
     let markdown = "";
-    // Recursive element formatter to preserve structure
     function parseNode(element) {
         element.contents().each((_, child) => {
             const node = $(child);
@@ -365,7 +366,6 @@ export function cleanInfoLegHtml(html) {
             }
         });
     }
-    // Target common body selectors or fallback to root
     const bodyText = $("body");
     if (bodyText.length > 0) {
         parseNode(bodyText);
@@ -373,19 +373,14 @@ export function cleanInfoLegHtml(html) {
     else {
         parseNode($.root());
     }
-    // Post-process to clean massive blank lines and spaces
     return markdown
         .replace(/[ \t]+/g, " ")
         .replace(/\n{3,}/g, "\n\n")
         .trim();
 }
-/**
- * Parses the HTML results page from InfoLEG's search endpoint.
- */
 function parseSearchResults(html) {
     const $ = cheerio.load(html);
     const results = [];
-    // Each result is a table row with links to verNorma.do
     $("table tr").each((_, row) => {
         const link = $(row).find("a[href*='verNorma.do']").first();
         if (!link.length)
@@ -396,7 +391,6 @@ function parseSearchResults(html) {
             return;
         const idMatch = href.match(/[?&]id=(\d+)/);
         const id = idMatch ? idMatch[1] : "";
-        // Grab description from second cell
         const cells = $(row).find("td");
         const descripcion = cells.length > 1 ? normalizeText(cells.eq(1).text()) : "";
         results.push({
@@ -410,18 +404,12 @@ function parseSearchResults(html) {
     });
     return results;
 }
-/**
- * Searches InfoLEG directly via servicios.infoleg.gob.ar (no Drupal, no captcha).
- * Intento 1: axios con Referer/Origin. Intento 2: Puppeteer si recibe 403.
- */
 async function searchCentralSolr(keys) {
-    // Build search URL using InfoLEG's own search endpoint
     const query = new URLSearchParams();
     query.set("texto", keys);
     query.set("pageSize", "20");
     query.set("pagina", "1");
     const url = `https://servicios.infoleg.gob.ar/infolegInternet/buscarNormas.do?${query.toString()}`;
-    // Intento 1: axios directo con headers completos
     try {
         const response = await axios.get(url, {
             httpsAgent,
@@ -432,20 +420,18 @@ async function searchCentralSolr(keys) {
             },
             responseType: "arraybuffer"
         });
-        // InfoLEG serves ISO-8859-1
         const decoder = new TextDecoder("latin1");
         const html = decoder.decode(response.data);
         return parseSearchResults(html);
     }
     catch (err) {
-        // Si no es 403, propagar el error
-        if (!err.response || err.response.status !== 403)
-            throw err;
-        console.error(`InfoLEG buscarNormas devolvio 403; reintentando con Puppeteer...`);
+        if (isGeoblockError(err)) {
+            const geoblockError = new Error(GEOBLOCK_MSG);
+            geoblockError.isGeoblock = true;
+            throw geoblockError;
+        }
+        throw err;
     }
-    // Intento 2: Puppeteer (simula navegador real, evita bloqueo 403)
-    const html = await fetchWithPuppeteer(url);
-    return parseSearchResults(html);
 }
 async function fetchWithPuppeteer(url) {
     const { default: puppeteer } = await import("puppeteer");
@@ -474,24 +460,29 @@ async function fetchCleanText(idNorma, textoHtmlManual) {
     if (idNorma) {
         const targetUrl = getInfoLegStaticUrl(idNorma, "actualizado");
         const originalUrl = getInfoLegStaticUrl(idNorma, "original");
-        // Intento 1: GET directo (rápido)
+        // Intento 1: GET directo
         for (const url of [targetUrl, originalUrl]) {
             try {
                 const response = await axios.get(url, { httpsAgent, headers: OFFICIAL_HEADERS });
                 return { text: cleanInfoLegHtml(response.data), url };
             }
-            catch {
-                // continúa al siguiente
+            catch (err) {
+                if (isGeoblockError(err)) {
+                    const geoblockError = new Error(GEOBLOCK_MSG);
+                    geoblockError.isGeoblock = true;
+                    throw geoblockError;
+                }
+                // otro error: continúa al siguiente URL
             }
         }
-        // Intento 2: Puppeteer (simula navegador, evita bloqueo 403)
+        // Intento 2: Puppeteer
         for (const url of [targetUrl, originalUrl]) {
             try {
                 const html = await fetchWithPuppeteer(url);
                 return { text: cleanInfoLegHtml(html), url };
             }
             catch {
-                // continúa al siguiente
+                // continúa
             }
         }
         throw new Error(`No se pudo obtener el texto de la norma ${idNorma}. El portal de InfoLeg puede estar caído temporalmente.`);
@@ -654,7 +645,6 @@ export function detectSolidaryLiability(text) {
     return results;
 }
 export function registerAllTools(server) {
-    // Tool 1: buscar_normativa
     server.tool("buscar_normativa", "Busca normativas (Leyes, Decretos, Resoluciones) en InfoLEG por palabras clave y criterios técnicos.", {
         criterio: z.string().describe("Términos clave de búsqueda legal (ej. 'maternidad', 'blanqueo de capitales')"),
         tipoNorma: z.string().optional().describe("Tipo de norma (ej. 'Ley', 'Decreto', 'Resolución')"),
@@ -664,7 +654,6 @@ export function registerAllTools(server) {
     }, async (args) => {
         try {
             let searchQuery = args.criterio;
-            // Append additional parameters to maximize Solr accuracy
             if (args.tipoNorma)
                 searchQuery += ` "${args.tipoNorma}"`;
             if (args.numeroNorma)
@@ -673,18 +662,39 @@ export function registerAllTools(server) {
                 searchQuery += ` ${args.anioNorma}`;
             console.error(`Searching InfoLEG Central Index for: "${searchQuery}"`);
             const searchResults = await searchCentralSolr(searchQuery);
+            let finalResults = searchResults;
             if (searchResults.length === 0) {
+                try {
+                    const modernParams = {
+                        texto: args.criterio,
+                        tipoNorma: args.tipoNorma,
+                        numeroNorma: args.numeroNorma,
+                        anioNorma: args.anioNorma,
+                        pagina: args.pagina || 1
+                    };
+                    const modernSearch = await searchNormativaOfficial(modernParams);
+                    finalResults = modernSearch.results.map(r => ({
+                        id: r.id,
+                        titulo: r.titulo,
+                        enlace: r.enlaceResumen || r.enlaceTexto,
+                        resumen: r.organismo ? `${r.organismo} - ${r.descripcion || ''}` : r.descripcion || ''
+                    }));
+                } catch (_fallbackErr) {
+                    // si el fallback también falla, devolver sin resultados
+                }
+            }
+            if (finalResults.length === 0) {
                 return {
                     content: [{
                             type: "text",
                             text: `No se encontraron resultados de InfoLEG para el criterio "${args.criterio}".\n\n` +
-                                `💡 Tip: Si tienes el ID directo de la ley o decreto, puedes llamar directamente a la herramienta "obtener_texto_norma" pasándole el ID (ej: "296831" para la Ley 27430).`
+                                `💡 Tip: Si tenés el ID directo de la ley o decreto, podés llamar directamente a "obtener_texto_norma" con ese ID (ej: "296831" para la Ley 27430).`
                         }]
                 };
             }
             let output = `# Resultados de Búsqueda en InfoLEG\n\n`;
-            output += `Se encontraron **${searchResults.length}** resultados para el criterio: *"${args.criterio}"*:\n\n`;
-            searchResults.forEach((r, idx) => {
+            output += `Se encontraron **${finalResults.length}** resultados para el criterio: *"${args.criterio}"*:\n\n`;
+            finalResults.forEach((r, idx) => {
                 output += `### ${idx + 1}. ${r.titulo}\n`;
                 if (r.id)
                     output += `* **ID de InfoLEG (idNorma):** \`${r.id}\`\n`;
@@ -693,29 +703,29 @@ export function registerAllTools(server) {
                     output += `* **Resumen:** *${r.resumen}*\n`;
                 output += `\n---\n\n`;
             });
-            output += `💡 *Para auditar el texto completo de cualquiera de estos resultados, ejecuta la herramienta "obtener_texto_norma" utilizando el **ID de InfoLEG (idNorma)** provisto.*`;
+            output += `💡 *Para obtener el texto completo, ejecutá "obtener_texto_norma" con el ID provisto.*`;
             return { content: [{ type: "text", text: output }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return {
                 content: [{
                         type: "text",
                         text: `⚠️ **Error al conectar con InfoLEG:** ${error.message}\n\n` +
-                            `El servidor de InfoLEG puede estar con demoras temporales.\n\n` +
-                            `**Alternativa:** Si conocés el ID de la norma, usá directamente la herramienta \`obtener_texto_norma\` con ese ID (ej: \`296831\` para la Ley 27430).`
+                            `**Alternativa:** Si conocés el ID de la norma, usá directamente "obtener_texto_norma" con ese ID.`
                     }],
                 isError: true
             };
         }
     });
-    // Tool 2: obtener_texto_norma
     server.tool("obtener_texto_norma", "Recupera el cuerpo verbatim articulado de una norma nacional por su ID en formato Markdown limpio.", {
         idNorma: stringOrNumber.describe("ID único de la norma en InfoLEG (ej. '296831')"),
         tipoTexto: z.enum(["actualizado", "original"]).optional().default("actualizado").describe("Variante del texto: 'actualizado' (con reformas) o 'original' (publicación inicial)"),
         textoHtmlManual: z.string().optional().describe("Texto completo de la norma copiado directamente desde el navegador web (útil si hay inconvenientes con la descarga automática)")
     }, async (args) => {
         const { idNorma, tipoTexto = "actualizado", textoHtmlManual } = args;
-        // Scenario A: Manual HTML/text bypass
         if (textoHtmlManual && textoHtmlManual.trim().length > 0) {
             console.error(`Using manually injected HTML for InfoLEG ID ${idNorma}`);
             try {
@@ -731,7 +741,6 @@ export function registerAllTools(server) {
                 return { content: [{ type: "text", text: `Error al procesar el texto manual: ${err.message}` }], isError: true };
             }
         }
-        // Scenario B: Real-time scraping (con fallback Puppeteer)
         const targetUrl = getInfoLegStaticUrl(idNorma, tipoTexto);
         console.error(`Fetching InfoLEG Static Text from: ${targetUrl}`);
         try {
@@ -744,6 +753,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             const fallbackUrl = `https://servicios.infoleg.gob.ar/infolegInternet/verNorma.do?id=${idNorma}`;
             return {
                 content: [{
@@ -756,19 +768,21 @@ export function registerAllTools(server) {
             };
         }
     });
-    // Tool 3: alcance_fuente
     server.tool("alcance_fuente", "Informa las capacidades, limitaciones técnicas, disclaimers y estado del conector legal de InfoLEG.", {}, async () => {
         const output = `# Alcance y Cobertura - Conector de Leyes Argentinas (InfoLEG)\n\n` +
             `## Especificaciones Técnicas\n` +
             `- **Nombre del Servidor:** \`infoleg-mcp\`\n` +
             `- **Fuente Primaria:** Portal de Información Legislativa (Ministerio de Justicia de la Nación Argentina).\n` +
             `- **Cobertura:** Leyes Nacionales, Decretos de Necesidad y Urgencia (DNU), Resoluciones, Disposiciones y actos administrativos nacionales.\n\n` +
+            `## Requisito de IP\n` +
+            `- Este conector requiere **IP argentina** para acceder a servicios.infoleg.gob.ar. Funciona correctamente desde Claude Desktop instalado en Argentina.\n` +
+            `- Desde entornos cloud (claude.ai, servidores externos) el portal bloquea el acceso. En ese caso, usá el campo \`textoHtmlManual\` para procesar texto copiado manualmente.\n\n` +
             `## Capacidades Destacadas\n` +
-            `1. **Selección de Variante:** Descarga y limpia el texto original o el texto consolidado actualizado (que incorpora enmiendas y derogaciones parciales históricas).\n` +
-            `2. **Rutas directas oficiales:** Genera de forma automática la ubicación del archivo de la norma en el portal del Estado sin necesidad de búsquedas secundarias.\n` +
-            `3. **Lectura de texto alternativo:** Si el sitio web oficial se encuentra congestionado o inaccesible, permite ingresar el texto copiado de la norma de forma manual en el campo \`textoHtmlManual\` para que la IA realice su análisis de inmediato sin demoras.\n\n` +
-            `## Aviso de Responsabilidad (Disclaimer)\n` +
-            `Este conector legal es una herramienta tecnológica automatizada de compilación y no representa asesoramiento jurídico formal. La fidelidad de los datos depende directamente del portal público gubernamental de InfoLEG.`;
+            `1. **Selección de Variante:** Descarga y limpia el texto original o el texto consolidado actualizado.\n` +
+            `2. **Rutas directas oficiales:** Genera automáticamente la ubicación del archivo en el portal del Estado.\n` +
+            `3. **Lectura manual:** Permite ingresar el texto copiado de la norma en \`textoHtmlManual\` para análisis inmediato sin conexión al portal.\n\n` +
+            `## Aviso de Responsabilidad\n` +
+            `Este conector es una herramienta tecnológica automatizada y no representa asesoramiento jurídico formal.`;
         return { content: [{ type: "text", text: output }] };
     });
     server.tool("buscar_normativa_avanzada", "Busca normativa en el buscador oficial de Argentina.gob.ar usando filtros humanos: jurisdiccion, provincia, tipo, numero, anio, dependencia, fechas y texto libre.", {
@@ -802,6 +816,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al buscar normativa avanzada: ${error.message}` }], isError: true };
         }
     });
@@ -822,6 +839,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: formatResultsList(`Busqueda de ${args.tipoNorma} ${args.numeroNorma}${args.anioNorma ? `/${args.anioNorma}` : ""}`, url, results) }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al buscar por tipo/numero/anio: ${error.message}` }], isError: true };
         }
     });
@@ -844,6 +864,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: formatResultsList(`Normas por dependencia: ${args.dependencia}`, url, results) }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al buscar por dependencia: ${error.message}` }], isError: true };
         }
     });
@@ -861,6 +884,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output.trim() }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al consultar boletin por numero: ${error.message}` }], isError: true };
         }
     });
@@ -880,6 +906,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output.trim() }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al consultar boletin por fecha: ${error.message}` }], isError: true };
         }
     });
@@ -896,6 +925,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: formatResultsList(`Coincidencias en Boletin ${data.numeroBoletin || args.fecha}`, data.url, filtered) }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al buscar en sumario: ${error.message}` }], isError: true };
         }
     });
@@ -939,6 +971,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output.trim() }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al obtener metadatos: ${error.message}` }], isError: true };
         }
     });
@@ -970,6 +1005,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output.trim() || "No se encontraron enlaces normativos." }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al extraer links: ${error.message}` }], isError: true };
         }
     });
@@ -1000,6 +1038,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (error) {
+            if (error.isGeoblock) {
+                return { content: [{ type: "text", text: error.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al comparar textos: ${error.message}` }], isError: true };
         }
     });
@@ -1028,12 +1069,12 @@ export function registerAllTools(server) {
         explanation += `| **+** | Presencia obligatoria | El término debe figurar. |\n`;
         explanation += `| **-** | Ausencia obligatoria | El término no debe figurar. |\n`;
         explanation += `| **"frase exacta"** | Sintagma cerrado | Desactiva aproximaciones y busca la secuencia exacta. |\n\n`;
-        explanation += `💡 *Tip: Puedes copiar la consulta Solr generada e inyectarla en el parámetro 'criterio' de 'buscar_normativa' o 'buscar_normativa_avanzada'.*`;
+        explanation += `💡 *Tip: Podés copiar la consulta Solr generada e inyectarla en el parámetro 'criterio' de 'buscar_normativa' o 'buscar_normativa_avanzada'.*`;
         return { content: [{ type: "text", text: explanation }] };
     });
     server.tool("extraer_justificacion_teleologica", "Extrae quirúrgicamente las justificaciones fácticas (Vistos y Considerandos) de una norma, aislando el espíritu de la ley.", {
         idNorma: z.string().optional().describe("ID de InfoLEG para descarga automática"),
-        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente si el sitio oficial presenta demoras o inconvenientes")
+        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente")
     }, async (args) => {
         try {
             const { text, url } = await fetchCleanText(args.idNorma, args.textoHtmlManual);
@@ -1046,12 +1087,15 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (err) {
+            if (err.isGeoblock) {
+                return { content: [{ type: "text", text: err.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al extraer vistos y considerandos: ${err.message}` }], isError: true };
         }
     });
     server.tool("detector_plazos_perentorios", "Audita el texto legal para detectar e indexar plazos de caducidad, prescripción y términos temporales imperativos.", {
         idNorma: z.string().optional().describe("ID de InfoLEG para descarga automática"),
-        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente si el sitio oficial presenta demoras o inconvenientes")
+        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente")
     }, async (args) => {
         try {
             const { text, url } = await fetchCleanText(args.idNorma, args.textoHtmlManual);
@@ -1062,8 +1106,7 @@ export function registerAllTools(server) {
                 output += `* **ID InfoLEG:** \`${args.idNorma}\`\n\n`;
             if (results.length === 0) {
                 output += `✅ No se encontraron términos perentorios ni menciones de plazos típicos en el cuerpo de la norma.`;
-            }
-            else {
+            } else {
                 output += `Se identificaron **${results.length}** cláusulas vinculadas a variables de tiempo y plazos:\n\n`;
                 results.forEach((r, idx) => {
                     output += `### ${idx + 1}. Cláusula Temporal (Indicador: ${r.matches.join(", ")})\n`;
@@ -1073,12 +1116,15 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (err) {
+            if (err.isGeoblock) {
+                return { content: [{ type: "text", text: err.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al auditar plazos: ${err.message}` }], isError: true };
         }
     });
     server.tool("evaluador_de_multas_y_sanciones", "Analiza el cuerpo normativo para inventariar y proyectar penalidades, multas pecuniarias y condenas sancionatorias.", {
         idNorma: z.string().optional().describe("ID de InfoLEG para descarga automática"),
-        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente si el sitio oficial presenta demoras o inconvenientes")
+        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente")
     }, async (args) => {
         try {
             const { text, url } = await fetchCleanText(args.idNorma, args.textoHtmlManual);
@@ -1089,8 +1135,7 @@ export function registerAllTools(server) {
                 output += `* **ID InfoLEG:** \`${args.idNorma}\`\n\n`;
             if (results.length === 0) {
                 output += `✅ No se detectaron cláusulas sancionatorias explícitas ni multas pecuniarias en la norma.`;
-            }
-            else {
+            } else {
                 output += `Se identificaron **${results.length}** secciones referentes a penalidades y multas:\n\n`;
                 results.forEach((r, idx) => {
                     output += `### ${idx + 1}. Disposición Punitiva (Foco: ${r.matches.join(", ")})\n`;
@@ -1100,12 +1145,15 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (err) {
+            if (err.isGeoblock) {
+                return { content: [{ type: "text", text: err.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al evaluar sanciones: ${err.message}` }], isError: true };
         }
     });
     server.tool("extractor_de_exenciones", "Extrae y resume las exenciones, exclusiones e inmunidades de la regla general aplicable.", {
         idNorma: z.string().optional().describe("ID de InfoLEG para descarga automática"),
-        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente si el sitio oficial presenta demoras o inconvenientes")
+        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente")
     }, async (args) => {
         try {
             const { text, url } = await fetchCleanText(args.idNorma, args.textoHtmlManual);
@@ -1116,8 +1164,7 @@ export function registerAllTools(server) {
                 output += `* **ID InfoLEG:** \`${args.idNorma}\`\n\n`;
             if (results.length === 0) {
                 output += `✅ No se detectaron exenciones o exclusiones de responsabilidad explícitas.`;
-            }
-            else {
+            } else {
                 output += `Se identificaron **${results.length}** cláusulas excepcionales:\n\n`;
                 results.forEach((r, idx) => {
                     output += `### ${idx + 1}. Exención Legal (Indicador: ${r.matches.join(", ")})\n`;
@@ -1127,12 +1174,15 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (err) {
+            if (err.isGeoblock) {
+                return { content: [{ type: "text", text: err.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al extraer exenciones: ${err.message}` }], isError: true };
         }
     });
     server.tool("rastreador_responsabilidad_solidaria", "Identifica cláusulas de responsabilidad personal y solidaria para socios, directores, fiduciarios y el velo societario.", {
         idNorma: z.string().optional().describe("ID de InfoLEG para descarga automática"),
-        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente si el sitio oficial presenta demoras o inconvenientes")
+        textoHtmlManual: z.string().optional().describe("Texto completo de la norma (copiado del navegador) para procesar localmente")
     }, async (args) => {
         try {
             const { text, url } = await fetchCleanText(args.idNorma, args.textoHtmlManual);
@@ -1143,8 +1193,7 @@ export function registerAllTools(server) {
                 output += `* **ID InfoLEG:** \`${args.idNorma}\`\n\n`;
             if (results.length === 0) {
                 output += `✅ No se detectaron cláusulas relativas a responsabilidad solidaria o riesgos directos sobre el velo societario.`;
-            }
-            else {
+            } else {
                 output += `Se identificaron **${results.length}** cláusulas que atribuyen responsabilidad solidaria u obligan a directivos/garantes:\n\n`;
                 results.forEach((r, idx) => {
                     output += `### ${idx + 1}. Responsabilidad Directa/Solidaria (Clase: ${r.matches.join(", ")})\n`;
@@ -1154,6 +1203,9 @@ export function registerAllTools(server) {
             return { content: [{ type: "text", text: output }] };
         }
         catch (err) {
+            if (err.isGeoblock) {
+                return { content: [{ type: "text", text: err.message }], isError: true };
+            }
             return { content: [{ type: "text", text: `Error al rastrear responsabilidad: ${err.message}` }], isError: true };
         }
     });
@@ -1171,17 +1223,14 @@ export function registerAllTools(server) {
         let sizeBytes = 0;
         let hash = "";
         try {
-            const response = await axios.get(targetUrl, {
-                httpsAgent,
-                headers: OFFICIAL_HEADERS
-            });
+            const response = await axios.get(targetUrl, { httpsAgent, headers: OFFICIAL_HEADERS });
             htmlContent = response.data;
             sizeBytes = Buffer.byteLength(htmlContent, "utf8");
             hash = crypto.createHash("sha256").update(htmlContent).digest("hex");
             integrityStatus = "VALIDADO_OK";
         }
         catch (err) {
-            integrityStatus = "FALLA_CONEXION_ESTATAL";
+            integrityStatus = isGeoblockError(err) ? "BLOQUEADO_GEOIP" : "FALLA_CONEXION_ESTATAL";
             hash = crypto.createHash("sha256").update(`${idNorma}-${tipoTexto}`).digest("hex");
         }
         let output = `::: ACTA DE CERTIFICACIÓN FORENSE DE AUTENTICIDAD Y TRAZABILIDAD PROBATORIA :::\n\n`;
@@ -1196,13 +1245,12 @@ export function registerAllTools(server) {
         output += `| **Peso del Documento** | \`${sizeBytes} bytes\` |\n`;
         output += `| **Estado de Integridad SSL/HTTP** | \`${integrityStatus}\` |\n`;
         output += `| **Hash SHA-256 de Control** | \`${hash}\` |\n\n`;
-        output += `> **[!] GARANTÍA DE NO ALTERACIÓN:** Este certificado garantiza que el articulado descargado coincide exactamente con el publicado de forma estática en la base central oficial de InfoLEG al momento de la consulta. La firma digital de control de la IA asegura que no se han producido alucinaciones semánticas ni reescrituras de la norma en el proceso.\n\n`;
+        output += `> **[!] GARANTÍA DE NO ALTERACIÓN:** Este certificado garantiza que el articulado descargado coincide exactamente con el publicado de forma estática en la base central oficial de InfoLEG al momento de la consulta.\n\n`;
         output += `*Este documento constituye un instrumento técnico de trazabilidad probatoria idóneo para su anexión en escritos procesales y dictámenes de auditoría legal corporativa.*`;
         return { content: [{ type: "text", text: output }] };
     });
 }
 export function registerAllPrompts(server) {
-    // Prompt 1: buscar_ley_decreto
     server.prompt("buscar_ley_decreto", "Realiza una búsqueda de normativas nacionales filtrando por tipo, número y año.", {
         criterio: z.string().describe("Criterio legal (ej. 'reforma tributaria', 'blanqueo')"),
         numero: stringOrNumberOptional.describe("Número de la norma (ej. '27430')"),
@@ -1210,110 +1258,35 @@ export function registerAllPrompts(server) {
     }, (args) => {
         const nro = args.numero ? ` de número ${args.numero}` : "";
         const anio = args.anio ? ` del año ${args.anio}` : "";
-        return {
-            messages: [
-                {
-                    role: "user",
-                    content: {
-                        type: "text",
-                        text: `Busca en InfoLEG normativas vinculadas con '${args.criterio}'${nro}${anio}.`
-                    }
-                }
-            ]
-        };
+        return { messages: [{ role: "user", content: { type: "text", text: `Busca en InfoLEG normativas vinculadas con '${args.criterio}'${nro}${anio}.` } }] };
     });
-    // Prompt 2: auditar_norma_completa
     server.prompt("auditar_norma_completa", "Flujo de trabajo encadenado para extraer y analizar a fondo el articulado consolidado de una norma.", {
         idNorma: stringOrNumber.describe("ID de InfoLEG a auditar (ej. '296831')")
     }, (args) => {
-        return {
-            messages: [
-                {
-                    role: "user",
-                    content: {
-                        type: "text",
-                        text: `Realiza una auditoría completa del texto legal actualizado de la norma con ID de InfoLEG '${args.idNorma}'.\n\n` +
-                            `Por favor, sigue estos pasos:\n` +
-                            `1. Recupera el texto de la norma usando \`obtener_texto_norma\` con idNorma: '${args.idNorma}' y tipoTexto: 'actualizado'.\n` +
-                            `2. Lee el articulado en detalle.\n` +
-                            `3. Realiza un informe estructurado que resuma:\n` +
-                            `   - El objeto principal de la norma.\n` +
-                            `   - Los artículos más relevantes vinculados a obligaciones corporativas u operativas.\n` +
-                            `   - Citas verbatim exactas y enlaces oficiales.`
-                    }
-                }
-            ]
-        };
+        return { messages: [{ role: "user", content: { type: "text", text: `Realiza una auditoría completa del texto legal actualizado de la norma con ID de InfoLEG '${args.idNorma}'.\n\n1. Recupera el texto usando \`obtener_texto_norma\` con idNorma: '${args.idNorma}' y tipoTexto: 'actualizado'.\n2. Lee el articulado en detalle.\n3. Genera un informe con el objeto principal, artículos relevantes y citas verbatim con enlaces oficiales.` } }] };
     });
-    // Prompt 3: comparar_original_actualizada
     server.prompt("comparar_original_actualizada", "Analiza el impacto y cambios de las enmiendas comparando los textos original y actualizado consolidado.", {
         idNorma: stringOrNumber.describe("ID de InfoLEG a comparar")
     }, (args) => {
-        return {
-            messages: [
-                {
-                    role: "user",
-                    content: {
-                        type: "text",
-                        text: `Por favor, analiza el impacto de las modificaciones en la norma de InfoLEG '${args.idNorma}' mediante los siguientes pasos:\n\n` +
-                            `1. Llama a \`obtener_texto_norma\` con ID '${args.idNorma}' y tipoTexto 'original' para ver su publicación inicial.\n` +
-                            `2. Llama a \`obtener_texto_norma\` con ID '${args.idNorma}' y tipoTexto 'actualizado' para ver su estado actual integrado.\n` +
-                            `3. Haz una comparación delta detallada, identificando qué artículos fueron modificados, derogados o incorporados y cuál fue su efecto en el tiempo.`
-                    }
-                }
-            ]
-        };
+        return { messages: [{ role: "user", content: { type: "text", text: `Analiza las modificaciones en la norma de InfoLEG '${args.idNorma}':\n1. Llama a \`obtener_texto_norma\` con tipoTexto 'original'.\n2. Llama a \`obtener_texto_norma\` con tipoTexto 'actualizado'.\n3. Compará artículos modificados, derogados o incorporados.` } }] };
     });
-    // Prompt 4: auditar_plazos_y_sanciones
     server.prompt("auditar_plazos_y_sanciones", "Genera una auditoría automática de plazos procesales, caducidades, multas y sanciones aplicables en la norma.", {
         idNorma: stringOrNumber.describe("ID de InfoLEG a auditar")
     }, (args) => {
-        return {
-            messages: [
-                {
-                    role: "user",
-                    content: {
-                        type: "text",
-                        text: `Por favor, realiza un análisis integral de riesgos sobre la norma de InfoLEG '${args.idNorma}' con los siguientes pasos:\n\n` +
-                            `1. Llama a \`detector_plazos_perentorios\` para identificar caducidades, prescripciones u obligaciones temporales.\n` +
-                            `2. Llama a \`evaluador_de_multas_y_sanciones\` para registrar todas las multas, penalidades y sanciones pecuniarias o administrativas.\n` +
-                            `3. Llama a \`extractor_de_exenciones\` para buscar excepciones de las reglas y defensas afirmativas.\n` +
-                            `4. Llama a \`rastreador_responsabilidad_solidaria\` para medir el riesgo de extensión de responsabilidad a administradores y directivos.\n` +
-                            `5. Genera un reporte consolidado de cumplimiento normativo y matriz de riesgos corporativos.`
-                    }
-                }
-            ]
-        };
+        return { messages: [{ role: "user", content: { type: "text", text: `Análisis integral de riesgos sobre la norma InfoLEG '${args.idNorma}':\n1. \`detector_plazos_perentorios\`\n2. \`evaluador_de_multas_y_sanciones\`\n3. \`extractor_de_exenciones\`\n4. \`rastreador_responsabilidad_solidaria\`\n5. Reporte consolidado de cumplimiento y matriz de riesgos.` } }] };
     });
-    // Prompt 5: certificar_norma_forense
     server.prompt("certificar_norma_forense", "Descarga el texto actualizado de una norma, extrae sus considerandos y genera su acta de certificación forense.", {
         idNorma: stringOrNumber.describe("ID de InfoLEG a certificar")
     }, (args) => {
-        return {
-            messages: [
-                {
-                    role: "user",
-                    content: {
-                        type: "text",
-                        text: `Por favor, genera un informe legal certificado para la norma con ID '${args.idNorma}' realizando estas acciones:\n\n` +
-                            `1. Llama a \`extraer_justificacion_teleologica\` para aislar los Considerandos y el espíritu del legislador (ratio legis).\n` +
-                            `2. Llama a \`generar_certificacion_forense\` para obtener el acta probatoria oficial con marca temporal y hash de control SHA-256.\n` +
-                            `3. Consolida ambos resultados en un escrito legal formal citando las fuentes oficiales y garantizando la inalterabilidad de los textos.`
-                    }
-                }
-            ]
-        };
+        return { messages: [{ role: "user", content: { type: "text", text: `Informe legal certificado para norma InfoLEG '${args.idNorma}':\n1. \`extraer_justificacion_teleologica\` para aislar Considerandos y ratio legis.\n2. \`generar_certificacion_forense\` para el acta con timestamp y hash SHA-256.\n3. Consolidá ambos en un escrito formal con fuentes oficiales.` } }] };
     });
 }
-// Instantiate server
 export const server = new McpServer({
     name: "infoleg-mcp",
-    version: "2.0.0"
+    version: "2.0.1"
 });
-// Register tools & prompts
 registerAllTools(server);
 registerAllPrompts(server);
-// Stdio startup condition
 if (typeof process !== "undefined" && !process.env.VERCEL && !process.env.NEXT_RUNTIME) {
     const transport = new StdioServerTransport();
     server.connect(transport).catch((err) => {

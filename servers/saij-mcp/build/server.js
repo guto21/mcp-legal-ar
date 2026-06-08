@@ -189,9 +189,16 @@ export class SaijMcpServer {
             }
             catch (error) {
                 if (error instanceof z.ZodError) {
-                    throw new Error(`Invalid arguments for ${name}: ${error.errors.map(e => e.message).join(", ")}`);
+                    return {
+                        content: [{ type: "text", text: `Argumentos inválidos para ${name}: ${error.errors.map(e => e.message).join(", ")}` }],
+                        isError: true,
+                    };
                 }
-                throw error;
+                const msg = error instanceof Error ? error.message : String(error);
+                return {
+                    content: [{ type: "text", text: `Error en ${name}: ${msg}` }],
+                    isError: true,
+                };
             }
         });
     }

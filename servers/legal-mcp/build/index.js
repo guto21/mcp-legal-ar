@@ -74,23 +74,31 @@ const CONNECTORS = [
 
 class ChildMcpClient {
     prefix;
+    config;
     proc;
     rl;
     pending = new Map();
     idCounter = 1;
     tools = [];
     ready = false;
-    // FIX BUG 5: flag para saber si el proceso murió en runtime
     dead = false;
+    _respawnAttempts = 0;
+    _respawnTimer = null;
 
     constructor(prefix, config) {
         this.prefix = prefix;
-        const env = { ...process.env, ...(config.env ?? {}) };
-        this.proc = spawn(config.command, config.args, {
-            cwd: config.cwd,
+        this.config = config;
+        this._spawn();
+    }
+
+    _spawn() {
+        const env = { ...process.env, ...(this.config.env ?? {}) };
+        this.proc = spawn(this.config.command, this.config.args, {
+            cwd: this.config.cwd,
             env,
             stdio: ["pipe", "pipe", "pipe"],
         });
+        this.dead = false;
         this.rl = readline.createInterface({ input: this.proc.stdout });
         this.rl.on("line", (line) => {
             line = line.trim();
@@ -116,16 +124,32 @@ class ChildMcpClient {
             const txt = d.toString().trim();
             if (txt) process.stderr.write(`[${this.prefix}] ${txt}\n`);
         });
-        // FIX BUG 5: marcar como muerto y limpiar pendientes en lugar de dejarlos colgados
         this.proc.on("exit", (code) => {
             this.dead = true;
             this.ready = false;
             process.stderr.write(`[${this.prefix}] proceso terminado (code ${code})\n`);
-            // Rechazar todos los pendientes para que no queden esperando timeout
             for (const [id, p] of this.pending) {
                 p.reject(new Error(`[${this.prefix}] proceso terminado inesperadamente (code ${code})`));
             }
             this.pending.clear();
+            // Respawn con backoff exponencial (max 5 intentos, max 60s)
+            if (!globalThis._hubShuttingDown && this._respawnAttempts < 5) {
+                const delay = Math.min(1000 * Math.pow(2, this._respawnAttempts), 60000);
+                this._respawnAttempts++;
+                process.stderr.write(`[${this.prefix}] respawn #${this._respawnAttempts} en ${delay}ms...\n`);
+                this._respawnTimer = setTimeout(async () => {
+                    try {
+                        this._spawn();
+                        await this.initialize();
+                        this._respawnAttempts = 0;
+                        process.stderr.write(`[${this.prefix}] respawn exitoso\n`);
+                    } catch (e) {
+                        process.stderr.write(`[${this.prefix}] respawn fallido: ${e.message}\n`);
+                    }
+                }, delay);
+            } else if (this._respawnAttempts >= 5) {
+                process.stderr.write(`[${this.prefix}] maximo de respawns alcanzado - conector deshabilitado\n`);
+            }
         });
     }
 
@@ -193,6 +217,7 @@ class ChildMcpClient {
     }
 
     kill() {
+        if (this._respawnTimer) clearTimeout(this._respawnTimer);
         this.proc.kill();
     }
 }
@@ -282,10 +307,12 @@ async function main() {
     });
 
     process.on("SIGINT", () => {
+        globalThis._hubShuttingDown = true;
         clients.forEach((c) => c.kill());
         process.exit(0);
     });
     process.on("SIGTERM", () => {
+        globalThis._hubShuttingDown = true;
         clients.forEach((c) => c.kill());
         process.exit(0);
     });

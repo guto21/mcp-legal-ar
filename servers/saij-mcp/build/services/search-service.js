@@ -104,7 +104,7 @@ export class SearchService {
             o: (params.offset || 0).toString(),
             p: (params.pageSize || 20).toString(),
             f: filterStr,
-            r: params.query || "*:*",
+            s: params.query === "*:*" ? "" : (params.query || ""),
             v: params.view || "colapsada",
         };
         const data = await apiClient.get("/busqueda", {

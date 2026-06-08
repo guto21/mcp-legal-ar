@@ -1,8 +1,8 @@
-# Legal Hub MCP - Argentina
+# mcp-legal-ar
 
 Servidor MCP unificado de herramientas jurídicas argentinas para Claude Desktop.
 
-Integra 11 fuentes legales en un único conector. En lugar de configurar cada servidor por separado, el abogado instala uno solo y accede a todo.
+Integra las principales fuentes legales en un único conector. En lugar de configurar cada servidor por separado, el abogado instala uno solo y accede a todo.
 
 Este repositorio no crea ninguna fuente nueva. Unifica en un solo conector los servidores MCP desarrollados por la comunidad argentina de legal tech.
 
@@ -10,19 +10,20 @@ Este repositorio no crea ninguna fuente nueva. Unifica en un solo conector los s
 
 ## ¿Qué es esto y para qué sirve?
 
-Claude Desktop puede conectarse a fuentes de información externas a través de conectores llamados MCP. Este repositorio instala un único conector que le da acceso a Claude a 11 bases de datos jurídicas argentinas al mismo tiempo:
+Claude Desktop puede conectarse a fuentes de información externas a través de conectores llamados MCP. Este repositorio instala un único conector que le da acceso a Claude a las principales bases de datos jurídicas argentinas al mismo tiempo:
 
-- Buscar jurisprudencia en JUBA, PJN y SCBA
-- Consultar el estado de expedientes federales
+- Buscar jurisprudencia en JUBA y SCBA
 - Leer el Boletín Oficial nacional y de la Provincia de Buenos Aires
-- Buscar legislación en InfoLEG, SAIJ y Normativa PBA
+- Buscar legislación en InfoLEG y Normativa PBA
 - Consultar dictámenes de la PTN y fallos del TFN
 
-Sin este hub, instalar cada conector por separado requeriría configurar 11 servidores distintos. Con este hub, se instala uno solo.
+Sin este hub, instalar cada conector por separado requeriría configurar múltiples servidores distintos. Con este hub, se instala uno solo.
 
 ---
 
-## Fuentes incluidas (168 herramientas)
+## Fuentes disponibles
+
+### ✅ Operativos
 
 | # | Nombre | Descripción | Herramientas | Crédito |
 |---|--------|-------------|--------------|---------|
@@ -31,12 +32,17 @@ Sin este hub, instalar cada conector por separado requeriría configurar 11 serv
 | 3 | **InfoLeg** | Legislación nacional | 20 | [voftec/InfoLeg-MCP](https://github.com/voftec/InfoLeg-MCP) |
 | 4 | **Normativa PBA** | Legislación provincial de Buenos Aires | 9 | [voftec/normativapba-mcp](https://github.com/voftec/normativapba-mcp) |
 | 5 | **JUBA** | Jurisprudencia SCBA y cámaras PBA | 21 | [voftec/juba-mcp](https://github.com/voftec/juba-mcp) |
-| 6 | **PJN Expedientes** | Estado procesal de causas federales | 16 | [voftec/pjn-consulta-mcp](https://github.com/voftec/pjn-consulta-mcp) |
-| 7 | **PJN Jurisprudencia** | Fallos y sentencias federales | 20 | [voftec/pjn-juris-mcp](https://github.com/voftec/pjn-juris-mcp) |
-| 8 | **PTN** | Dictámenes de la Procuración del Tesoro | 22 | [voftec/ptn-mcp](https://github.com/voftec/ptn-mcp) |
-| 9 | **TFN** | Tribunal Fiscal de la Nación | 16 | [voftec/tfn-mcp](https://github.com/voftec/tfn-mcp) |
-| 10 | **SCBA** | Sentencias y resoluciones de la Suprema Corte de Buenos Aires | 4 | [FacundoEmanuel/scba-mcp-server](https://github.com/FacundoEmanuel/scba-mcp-server) |
-| 11 | **SAIJ** | Sistema Argentino de Información Jurídica (330.000+ documentos) | 11 | [joaquinescalante23/saij-mcp](https://github.com/joaquinescalante23/saij-mcp) |
+| 6 | **PTN** | Dictámenes de la Procuración del Tesoro | 22 | [voftec/ptn-mcp](https://github.com/voftec/ptn-mcp) |
+| 7 | **TFN** | Tribunal Fiscal de la Nación | 16 | [voftec/tfn-mcp](https://github.com/voftec/tfn-mcp) |
+| 8 | **SCBA** | Sentencias y resoluciones de la Suprema Corte de Buenos Aires | 4 | [FacundoEmanuel/scba-mcp-server](https://github.com/FacundoEmanuel/scba-mcp-server) |
+
+### 🔧 En desarrollo
+
+| # | Nombre | Descripción | Estado |
+|---|--------|-------------|--------|
+| 9 | **SAIJ** | Sistema Argentino de Información Jurídica (330.000+ documentos) | Requiere autenticación de sesión |
+| 10 | **PJN Expedientes** | Estado procesal de causas federales | Requiere resolución de CAPTCHA |
+| 11 | **PJN Jurisprudencia** | Fallos y sentencias federales | Requiere resolución de CAPTCHA |
 
 ---
 
@@ -57,7 +63,13 @@ Si aparece un número de versión (por ejemplo `v20.11.0`), ya está instalado.
 
 ---
 
-## Instalación paso a paso
+## Instalación (opción recomendada - automática)
+
+Hacer clic derecho sobre el archivo `setup.ps1` que está en la carpeta raíz del repositorio y seleccionar **"Ejecutar con PowerShell"**. El script instala las dependencias y configura Claude Desktop automáticamente.
+
+---
+
+## Instalación manual (paso a paso)
 
 ### Paso 1 - Descargar el repositorio
 
@@ -71,13 +83,9 @@ Abrir el símbolo del sistema (CMD) y ejecutar los siguientes comandos uno por u
 cd C:\legal-hub
 npm install
 cd servers\legal-mcp
-set PUPPETEER_SKIP_DOWNLOAD=true && npm install
-cd ..\saij-mcp
 npm install
 cd ..\..
 ```
-
-> **Nota:** `PUPPETEER_SKIP_DOWNLOAD=true` evita que se descargue Chromium durante la instalación (no es necesario para el funcionamiento del hub). En Mac/Linux reemplazar `set` por `export`.
 
 ### Paso 3 - Configurar Claude Desktop
 
@@ -93,11 +101,11 @@ Reemplazar `TU_USUARIO` con el nombre de usuario de Windows. Abrir ese archivo c
 "legal-hub": {
   "command": "node",
   "args": ["C:\\legal-hub\\build\\index.js"],
-  "cwd": "C:\\legal-hub"
+  "env": {
+    "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+  }
 }
 ```
-
-La carpeta puede llamarse como quieras (`C:\legal-hub`, `C:\legal-hub-mcp`, etc.). Lo importante es usar esa misma ruta en `cwd` y en `args`. Usar doble barra invertida `\\` en todas las rutas del JSON.
 
 El archivo completo debería quedar así:
 
@@ -107,15 +115,19 @@ El archivo completo debería quedar así:
     "legal-hub": {
       "command": "node",
       "args": ["C:\\legal-hub\\build\\index.js"],
-      "cwd": "C:\\legal-hub"
+      "env": {
+        "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+      }
     }
   }
 }
 ```
 
+> **Importante:** usar doble barra invertida `\\` en todas las rutas del JSON. La carpeta puede llamarse como quieras; lo que importa es que la ruta en `args` apunte al `build\index.js` de donde extrajiste el repositorio.
+
 ### Paso 4 - Reiniciar Claude Desktop
 
-Cerrar Claude Desktop completamente: click derecho en el ícono de la bandeja del sistema (esquina inferior derecha) y seleccionar **Salir**. Volver a abrirlo. El conector `legal-hub` debería aparecer en la lista de herramientas con 168 herramientas disponibles.
+Cerrar Claude Desktop completamente: click derecho en el ícono de la bandeja del sistema (esquina inferior derecha) y seleccionar **Salir**. Volver a abrirlo. El conector `legal-hub` debería aparecer en la lista de herramientas disponibles.
 
 ---
 
@@ -134,28 +146,22 @@ Verificar que Node.js esté instalado correctamente ejecutando `node --version` 
 Algunos conectores dependen de que las webs oficiales estén disponibles. Si una fuente está caída, el resto sigue funcionando normalmente.
 
 ---
- 
-## Seguridad y privacidad
- 
-Una preocupación legítima al conectar cualquier servidor MCP es saber qué hace con las consultas que recibe.
- 
-Este hub fue diseñado desde el principio para correr localmente en la computadora del usuario, sin ningún servidor en el medio. 
- 
-**El hub corre en tu máquina y solo en tu máquina.**
- 
-**Cómo funciona:** el hub corre en tu propia computadora mediante transporte stdio, que es comunicación directa entre Claude Desktop y el servidor sin pasar por ninguna red externa. Las consultas nunca salen de tu máquina hacia un servidor intermediario. Los conectores consultan únicamente las webs jurídicas oficiales públicas (boletines oficiales, bases de jurisprudencia) y devuelven la respuesta directamente a Claude.
- 
-**Qué no hace este hub:** no registra consultas, no las envía a terceros, no tiene capacidad de accionar sobre sistemas externos más allá de consultar las fuentes jurídicas públicas para las que fue diseñado.
 
-**Certificados TLS:** el hub desactiva la verificación de certificados SSL (`NODE_TLS_REJECT_UNAUTHORIZED=0`) para los conectores. Esto es necesario porque varias fuentes jurídicas oficiales argentinas presentan certificados con cadenas incompletas o dominios desactualizados. Al correr enteramente en la máquina local y consultar solo sitios públicos conocidos, el riesgo práctico es mínimo. En entornos corporativos con proxy SSL-inspection, esta configuración puede requerir ajuste.
- 
-**Auditoría:** al ser open source, cualquier abogado o su equipo técnico puede leer el código antes de instalarlo y verificar exactamente qué hace. Todo el código está disponible en este repositorio y en los repositorios originales de cada conector listados en la tabla de fuentes.
- 
+## Seguridad y privacidad
+
+**El hub corre en tu máquina y solo en tu máquina.**
+
+El hub corre en tu propia computadora mediante transporte stdio - comunicación directa entre Claude Desktop y el servidor sin pasar por ningún servidor intermediario. Las consultas nunca salen de tu máquina hacia un servidor de terceros. Los conectores consultan únicamente las webs jurídicas oficiales públicas (boletines oficiales, bases de jurisprudencia) y devuelven la respuesta directamente a Claude.
+
+El hub no registra consultas, no las envía a terceros, no tiene capacidad de accionar sobre sistemas externos más allá de consultar las fuentes jurídicas públicas para las que fue diseñado.
+
+**Certificados TLS:** el hub desactiva la verificación de certificados SSL (`NODE_TLS_REJECT_UNAUTHORIZED=0`). Esto es necesario porque varias fuentes jurídicas oficiales argentinas presentan certificados con cadenas incompletas. Al correr enteramente en la máquina local y consultar solo sitios públicos conocidos, el riesgo práctico es mínimo.
+
 ---
 
 ## Arquitectura
 
-`legal-hub` es un servidor proxy MCP. Al iniciarse, levanta cada conector como proceso hijo, registra todas sus herramientas y las expone como un único servidor. Claude Desktop ve un solo conector con todas las herramientas disponibles.
+`mcp-legal-ar` es un servidor proxy MCP. Al iniciarse, levanta cada conector como proceso hijo, registra todas sus herramientas y las expone como un único servidor. Claude Desktop ve un solo conector con todas las herramientas disponibles.
 
 ```
 Claude Desktop
@@ -165,11 +171,8 @@ Claude Desktop
            ├── infoleg__*      → proceso hijo Node
            ├── normativapba__* → proceso hijo Node
            ├── juba__*         → proceso hijo Node
-           ├── pjn__*          → proceso hijo Node
-           ├── pjnjuris__*     → proceso hijo Node
            ├── ptn__*          → proceso hijo Node
            ├── tfn__*          → proceso hijo Node
-           ├── saij__*         → proceso hijo Node
            └── scba__*         → proceso hijo Node
 ```
 
@@ -179,8 +182,7 @@ Claude Desktop
 
 Este repositorio únicamente unifica servidores MCP desarrollados por otros. Todo el mérito de cada conector corresponde a sus autores originales:
 
-- BORA, BOPBA, InfoLeg, Normativa PBA, JUBA, PJN Expedientes, PJN Jurisprudencia, PTN, TFN - [Voftec](https://github.com/voftec)
-- SAIJ MCP - [Joaquín Escalante](https://github.com/joaquinescalante23)
+- BORA, BOPBA, InfoLeg, Normativa PBA, JUBA, PTN, TFN - [Voftec](https://github.com/voftec)
 - SCBA MCP Server - [FacundoEmanuel](https://github.com/FacundoEmanuel)
 
 Ensamblado por [@abogadoaboitiz](https://x.com/abogadoaboitiz)
