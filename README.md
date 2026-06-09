@@ -1,23 +1,21 @@
 # mcp-legal-ar
 
-Servidor MCP unificado de herramientas jurídicas argentinas para Claude Desktop.
-
-Integra las principales fuentes legales en un único conector. En lugar de configurar cada servidor por separado, el abogado instala uno solo y accede a todo.
-
-Este repositorio no crea ninguna fuente nueva. Unifica en un solo conector los servidores MCP desarrollados por la comunidad argentina de legal tech.
+8 conectores jurídicos argentinos integrados en uno solo. 100% local. Sin servidores externos de terceros. Código abierto y auditable.
 
 ---
 
 ## ¿Qué es esto y para qué sirve?
 
-Claude Desktop puede conectarse a fuentes de información externas a través de conectores llamados MCP. Este repositorio instala un único conector que le da acceso a Claude a las principales bases de datos jurídicas argentinas al mismo tiempo:
+Claude Desktop puede conectarse a bases de datos externas a través de conectores llamados MCP. Este repositorio instala un único conector que le da acceso simultáneo a las principales fuentes jurídicas argentinas:
 
-- Buscar jurisprudencia en JUBA y SCBA
-- Leer el Boletín Oficial nacional y de la Provincia de Buenos Aires
-- Buscar legislación en InfoLEG y Normativa PBA
-- Consultar dictámenes de la PTN y fallos del TFN
+- Jurisprudencia: JUBA, SCBA
+- Boletines oficiales: BORA, BOPBA
+- Legislación: InfoLEG, Normativa PBA
+- Doctrina administrativa y fiscal: PTN, TFN
 
-Sin este hub, instalar cada conector por separado requeriría configurar múltiples servidores distintos. Con este hub, se instala uno solo.
+Sin este hub, cada fuente requeriría instalar y configurar un conector por separado. Con este hub, se instala uno solo y las 8 fuentes quedan disponibles al mismo tiempo.
+
+Este repositorio no crea ninguna fuente nueva. Unifica conectores desarrollados por la comunidad argentina de legal tech; el mérito de cada uno corresponde a sus autores originales.
 
 ---
 
@@ -157,11 +155,11 @@ Algunos conectores dependen de que las webs oficiales estén disponibles. Si una
 
 ## Seguridad y privacidad
 
-**El hub corre en tu máquina y solo en tu máquina.**
+**Transporte local (stdio).** El hub se comunica con Claude Desktop directamente en tu máquina, sin pasar por ningún servidor intermediario. Las consultas no salen hacia infraestructura de terceros.
 
-El hub corre en tu propia computadora mediante transporte stdio - comunicación directa entre Claude Desktop y el servidor sin pasar por ningún servidor intermediario. Las consultas nunca salen de tu máquina hacia un servidor de terceros. Los conectores consultan únicamente las webs jurídicas oficiales públicas (boletines oficiales, bases de jurisprudencia) y devuelven la respuesta directamente a Claude.
+**Solo lectura.** El hub no escribe archivos, no ejecuta comandos y no actúa sobre ningún endpoint. No registra consultas ni las envía a ningún destino externo.
 
-El hub no registra consultas, no las envía a terceros, no tiene capacidad de accionar sobre sistemas externos más allá de consultar las fuentes jurídicas públicas para las que fue diseñado.
+**Auditable.** El código fuente completo está en GitHub. Cualquier abogado o profesional de seguridad puede verificar exactamente qué hace cada conector antes de instalarlo.
 
 **Certificados TLS:** cada conector usa validación TLS estándar. La única excepción es SCBA (`sentencias.scba.gov.ar`), cuyo servidor oficial presenta un certificado con cadena de confianza incompleta. Para ese conector la verificación está desactivada de forma aislada dentro de su propio cliente HTTP, sin afectar al resto del stack. El tráfico involucrado es exclusivamente de lectura de jurisprudencia pública, sin credenciales ni datos del usuario.
 
