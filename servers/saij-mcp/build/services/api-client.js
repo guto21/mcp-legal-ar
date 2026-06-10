@@ -94,6 +94,17 @@ export class ApiClient {
                     e.code = "SAIJ_403";
                     return Promise.reject(e);
                 }
+                if (error.response?.status === 500) {
+                    // Verificado 10/06/2026: SAIJ devuelve 500 con {"success":false,...}
+                    // cuando los parametros de /busqueda son invalidos (ej. termino en
+                    // `s` en lugar de `r`). No es bloqueo: es consulta malformada.
+                    const e = new Error(
+                        "SAIJ devolvió error de operación (HTTP 500). Suele indicar " +
+                        "parámetros de consulta inválidos; revisar sintaxis de `r`/`f`."
+                    );
+                    e.code = "SAIJ_500";
+                    return Promise.reject(e);
+                }
                 return Promise.reject(error);
             }
         );

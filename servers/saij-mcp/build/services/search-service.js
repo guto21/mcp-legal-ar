@@ -98,15 +98,33 @@ export class SearchService {
     }
     /**
      * Generic search using a raw filter string.
+     *
+     * FIX 10/06/2026 (capturado del trafico real del buscador de saij.gob.ar):
+     * el termino de busqueda viaja en el parametro `r` (rawQuery), NO en `s`.
+     * Mandar el termino en `s` provoca HTTP 500 ("Ocurrió un error durante la
+     * operación"). Formato verificado: r="+titulo: despido", r="+tema:despido",
+     * frases con "?" entre palabras (r="+tema:despido?por?riña"); `s` va vacio.
      */
+    buildRawQuery(query) {
+        if (!query || query === "*:*") return "";
+        const q = String(query).trim();
+        // Campo explicito ("titulo: locacion de obra", "tema:despido", etc.):
+        // normaliza a "+campo: palabras?unidas" (sintaxis de la UI de SAIJ).
+        const m = q.match(/^\+?([a-z][a-z-]*):\s*(.+)$/i);
+        if (m) return `+${m[1].toLowerCase()}: ${m[2].trim().split(/\s+/).join("?")}`;
+        // Texto libre: tal cual (el parser del servidor lo expande).
+        return q;
+    }
     async searchRaw(filterStr, params) {
         const queryParams = {
             o: (params.offset || 0).toString(),
             p: (params.pageSize || 20).toString(),
             f: filterStr,
-            s: params.query === "*:*" ? "" : (params.query || ""),
+            s: "",
             v: params.view || "colapsada",
         };
+        const r = this.buildRawQuery(params.query);
+        if (r) queryParams.r = r;
         const data = await apiClient.get("/busqueda", {
             params: queryParams,
         });

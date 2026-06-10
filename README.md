@@ -1,6 +1,6 @@
 # mcp-legal-ar
 
-8 conectores jurídicos argentinos integrados en uno solo. 100% local. Sin servidores externos de terceros. Código abierto y auditable.
+9 conectores jurídicos argentinos operativos integrados en uno solo (+2 en desarrollo). 100% local. Sin servidores externos de terceros. Código abierto y auditable.
 
 ---
 
@@ -12,8 +12,9 @@ Claude Desktop puede conectarse a bases de datos externas a través de conectore
 - Boletines oficiales: BORA, BOPBA
 - Legislación: InfoLEG, Normativa PBA
 - Doctrina administrativa y fiscal: PTN, TFN
+- Expedientes federales: PJN Consulta (vía sesión HITL)
 
-Sin este hub, cada fuente requeriría instalar y configurar un conector por separado. Con este hub, se instala uno solo y las 8 fuentes quedan disponibles al mismo tiempo.
+Sin este hub, cada fuente requeriría instalar y configurar un conector por separado. Con este hub, se instala uno solo y las 9 fuentes operativas quedan disponibles al mismo tiempo. PJN Jurisprudencia y SAIJ están incluidos pero todavía en desarrollo (ver "Fuentes disponibles").
 
 Este repositorio no crea ninguna fuente nueva. Unifica conectores desarrollados por la comunidad argentina de legal tech; el mérito de cada uno corresponde a sus autores originales.
 
@@ -33,7 +34,9 @@ Claude Desktop
            ├── juba__*         → proceso hijo Node
            ├── ptn__*          → proceso hijo Node
            ├── tfn__*          → proceso hijo Node
-           └── scba__*         → proceso hijo Node
+           ├── scba__*         → proceso hijo Node
+           ├── pjn__*          → proceso hijo Node (búsqueda dentro del navegador HITL)
+           └── pjnjuris__*     → proceso hijo Node (en desarrollo — ver Fuentes)
 ```
 
 ---
@@ -43,6 +46,8 @@ Claude Desktop
 **Transporte local (stdio).** El hub se comunica con Claude Desktop directamente en tu máquina, sin pasar por ningún servidor intermediario. Las consultas no salen hacia infraestructura de terceros.
 
 **Solo lectura.** El hub no escribe archivos, no ejecuta comandos y no actúa sobre ningún endpoint. No registra consultas ni las envía a ningún destino externo.
+
+**CAPTCHA resuelto por vos, no por el agente.** El portal del Poder Judicial de la Nación (PJN) está protegido por un captcha propio (captcha.pjn.gov.ar). El diseño es human-in-the-loop: `iniciar_hitl_browser` abre una ventana de navegador real y todas las consultas corren dentro de esa sesión; cuando el portal pide el captcha, lo completás **vos** a mano y la consulta continúa. El hub no intenta resolverlo ni evadirlo automáticamente: no hay OCR ni técnicas de bypass.
 
 **Auditable.** El código fuente completo está en GitHub. Cualquier abogado o profesional de seguridad puede verificar exactamente qué hace cada conector antes de instalarlo.
 
@@ -172,14 +177,14 @@ Algunos conectores dependen de que las webs oficiales estén disponibles. Si una
 | 6 | **PTN** | Dictámenes de la Procuración del Tesoro | 22 | [voftec/ptn-mcp](https://github.com/voftec/ptn-mcp) |
 | 7 | **TFN** | Tribunal Fiscal de la Nación | 15 | [voftec/tfn-mcp](https://github.com/voftec/tfn-mcp) |
 | 8 | **SCBA** | Sentencias y resoluciones de la Suprema Corte de Buenos Aires | 4 | [FacundoEmanuel/scba-mcp-server](https://github.com/FacundoEmanuel/scba-mcp-server) |
+| 9 | **PJN Consulta** | Estado procesal de expedientes federales (reescrito 10/6/26: las consultas corren dentro del navegador HITL; captcha resuelto por el usuario; por parte solo DEMANDADO, límite del portal público) | 14 | reescritura propia (estructura original: [voftec](https://github.com/voftec)) |
 
 ### 🔧 En desarrollo
 
 | # | Nombre | Descripción | Estado |
 |---|--------|-------------|--------|
-| 9 | **SAIJ** | Sistema Argentino de Información Jurídica (330.000+ documentos) | Requiere autenticación de sesión |
-| 10 | **PJN Expedientes** | Estado procesal de causas federales | Requiere resolución de CAPTCHA |
-| 11 | **PJN Jurisprudencia** | Fallos y sentencias federales | Requiere resolución de CAPTCHA |
+| 10 | **PJN Jurisprudencia** | Fallos y sentencias federales | Scaffold sin búsqueda funcional; pendiente de la misma reescritura HITL que PJN Consulta. |
+| 11 | **SAIJ** | Sistema Argentino de Información Jurídica (330.000+ documentos) | Bloqueo anti-bot (HTTP 403); en evaluación un fallback de host alternativo |
 
 ---
 
@@ -187,13 +192,24 @@ Algunos conectores dependen de que las webs oficiales estén disponibles. Si una
 
 Este repositorio únicamente unifica servidores MCP desarrollados por otros. Todo el mérito de cada conector corresponde a sus autores originales:
 
-- BORA, BOPBA, InfoLeg, Normativa PBA, JUBA, PTN, TFN - [Voftec](https://github.com/voftec)
+- BORA, BOPBA, InfoLeg, Normativa PBA, JUBA, PTN, TFN, PJN Consulta, PJN Jurisprudencia - [Voftec](https://github.com/voftec) *(repositorios originales bajo licencia MIT; ya no disponibles públicamente — ver nota de licencias abajo)*
 - SCBA MCP Server - [FacundoEmanuel](https://github.com/FacundoEmanuel)
 
 Ensamblado por [@abogadoaboitiz](https://x.com/abogadoaboitiz)
 
 ---
 
-## Licencia
+## Licencias
 
-Apache 2.0
+Este repositorio combina código bajo dos licencias:
+
+- **El hub/proxy** (`servers/legal-mcp/build/index.js` y scripts de ensamblado): Apache 2.0.
+- **Los conectores de Voftec** (BORA, BOPBA, InfoLeg, Normativa PBA, JUBA, PTN, TFN, PJN): publicados originalmente bajo licencia **MIT**.
+
+Los repositorios originales de Voftec ya no están disponibles públicamente. La licencia MIT es un permiso irrevocable sobre las copias ya obtenidas: que el autor haya despublicado los repos no retira la concesión sobre el código que ya estaba distribuido bajo MIT. La MIT permite uso y redistribución **siempre que se conserve el aviso de copyright y el texto de la licencia** en las copias.
+
+Las licencias y atribuciones de todos los conectores de terceros están reunidas en **[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)**, conforme exige MIT (inclusión del texto de licencia en las redistribuciones).
+
+> **Nota sobre los `LICENSE` de Voftec:** el archivo `LICENSE` que Voftec distribuía en cada repo contenía el texto MIT **sin** la línea "Copyright (c) año titular". Se preserva tal cual en `THIRD_PARTY_NOTICES.md`, con la autoría atribuida a Voftec por nombre. SAIJ (en desarrollo) es de **Joaquin Escalante** (MIT con copyright 2026), no de Voftec. Falta incorporar el texto exacto del `LICENSE` de SCBA desde el repo de FacundoEmanuel (sigue disponible).
+
+El crédito a los autores originales se mantiene en la sección "Créditos" y en "Fuentes disponibles".

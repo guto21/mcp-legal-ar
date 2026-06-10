@@ -35,8 +35,10 @@ const NODE = resolveNode();
 const TIMEOUTS = {
     default:  20000,
     scba:     60000,
-    pjnjuris: 60000,
-    pjn:      30000,
+    pjnjuris: 90000, // HITL v2: arranque de Chromium + SPA + fetch en pagina
+    // pjn HITL v2: irAHome + settle (hasta 30s) + scraping; ademas el primer
+    // iniciar_hitl_browser paga el arranque de Chromium.
+    pjn:      90000,
     saij:     30000,
     // infoleg tiene cadena de fallbacks con Puppeteer (render JS de
     // argentina.gob.ar) que no entra en 20s.
@@ -61,11 +63,19 @@ const CONNECTORS = [
     { prefix: "infoleg",      command: NODE, args: [path.join(LEGAL_MCP, "build", "infoleg.js")],      cwd: LEGAL_MCP },
     { prefix: "normativapba", command: NODE, args: [path.join(LEGAL_MCP, "build", "normativapba.js")], cwd: LEGAL_MCP },
     { prefix: "juba",         command: NODE, args: [path.join(LEGAL_MCP, "build", "juba.js")],         cwd: LEGAL_MCP },
-    // DESHABILITADO - reCAPTCHA obligatorio: { prefix: "pjn",      command: NODE, args: [path.join(LEGAL_MCP, "build", "pjn.js")],      cwd: LEGAL_MCP },
-    // DESHABILITADO - reCAPTCHA obligatorio: { prefix: "pjnjuris", command: NODE, args: [path.join(LEGAL_MCP, "build", "pjnjuris.js")], cwd: LEGAL_MCP },
+    // pjn REHABILITADO 10/6/26: reescritura HITL v2 (la busqueda corre dentro del
+    // navegador vivo, globalPage; selectores capturados en _capturas/pjn-capture-*).
+    // El captcha lo resuelve siempre el usuario. Ver REPORTE_FIXES_2026-06-10.md #11.
+    { prefix: "pjn",          command: NODE, args: [path.join(LEGAL_MCP, "build", "pjn.js")],          cwd: LEGAL_MCP },
+    // pjnjuris REHABILITADO 10/6/26: reescritura HITL v2 contra el portal real
+    // sj.pjn.gov.ar (API REST capturada en vivo; el host del scaffold no existia).
+    { prefix: "pjnjuris",     command: NODE, args: [path.join(LEGAL_MCP, "build", "pjnjuris.js")],     cwd: LEGAL_MCP },
     { prefix: "ptn",          command: NODE, args: [path.join(LEGAL_MCP, "build", "ptn.js")],          cwd: LEGAL_MCP },
     { prefix: "tfn",          command: NODE, args: [path.join(LEGAL_MCP, "build", "tfn.js")],          cwd: LEGAL_MCP },
-    // DESHABILITADO - HTTP 403 anti-bot: { prefix: "saij", command: NODE, args: [path.join(SAIJ_DIR, "build", "index.js")], cwd: SAIJ_DIR },
+    // saij REHABILITADO 10/6/26: el 403 anti-bot expiro (probe desde la maquina del
+    // usuario: las 4 vias llegan al servidor). El 500 que quedaba era consulta
+    // malformada: el termino va en `r`, no en `s` (fix en saij-mcp/build/services/).
+    { prefix: "saij",         command: NODE, args: [path.join(LEGAL_MCP, "build", "saij.js")],         cwd: LEGAL_MCP },
     { prefix: "scba",         command: NODE, args: [path.join(LEGAL_MCP, "build", "scba.js")],         cwd: LEGAL_MCP }, // TLS manejado internamente via https.Agent aislado
 ];
 

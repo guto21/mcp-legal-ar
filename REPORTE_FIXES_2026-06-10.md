@@ -126,6 +126,129 @@ Estado final del modulo InfoLEG:
 - Texto por ID: ✅ via argentina.gob.ar/{id}/texto (original; actualizado con advertencia mientras dure el ban)
 - servicios.infoleg.gob.ar: sigue baneado para trafico automatizado de esta IP (tambien a Puppeteer); el buscador clasico Solr y texact.htm vuelven solos cuando el WAF levante el ban, porque siguen primeros en la cadena de intentos.
 
+## RONDA 6 - TEXTO CONSOLIDADO Y CODIGOS TRONCALES
+
+Disparador: en otra sesion, "buscar el art. 1 del Codigo Penal" fallo por buscador (texto libre entierra los codigos bajo normas recientes) y la respuesta cito el TEXTO ORIGINAL de 1921 (2 incisos) cuando el art. 1 vigente tiene un inciso 3° incorporado por Ley 27.401. Riesgo de cita erronea real.
+
+Dos mejoras:
+1. **Texto consolidado via argentina.gob.ar:** se descubrio y verifico que `/normativa/nacional/{id}/actualizacion` sirve el TEXTO ACTUALIZADO server-rendered con notas de reforma articulo por articulo (verificado con el Codigo Penal id 16546). `fetchTextoFromArgentinaGobAr` ahora intenta /actualizacion primero cuando se pide "actualizado" y solo cae al original (con advertencia) si la norma no tiene consolidado. El ban de servicios.infoleg ya no cuesta el texto vigente.
+2. **Tool nueva `localizar_codigo`:** resuelve el ID InfoLEG de los codigos troncales sin pasar por el buscador. IDs verificados uno por uno contra la fuente (10/6/26): Codigo Penal = Ley 11.179, id 16546; CCyC = Ley 26.994, id 235975; LCT = Ley 20.744, id 25552; CPCCN = Ley 17.454, id 16547; Codigo Aduanero = Ley 22.415, id 16536. La descripcion instruye al agente a usarla antes que buscar_normativa para cualquier codigo.
+
+Re-test tras reiniciar: pedir "art. 1 del Codigo Penal segun InfoLEG" → debe usar localizar_codigo → obtener_texto_norma 16546 actualizado → art. 1 con TRES incisos y nota de sustitucion por Ley 27.401.
+
+## RONDA 7 - PJN REACTIVADO (HITL) + README
+
+Decision: reactivar PJN Consulta y PJN Jurisprudencia. El codigo ya tenia el patron correcto y compatible: `iniciar_hitl_browser` abre Chromium visible (headless:false), el USUARIO resuelve el reCAPTCHA a mano, `finalizar_hitl_browser` cosecha cookies+userAgent de la sesion ya validada. No hay OCR ni bypass automatizado; la verificacion humana la hace una persona. Las demas tools reciben el captchaToken obtenido por esa via.
+
+Cambios:
+- `index.js`: descomentados los conectores `pjn` y `pjnjuris` (el comentario "reCAPTCHA obligatorio" estaba obsoleto; el flujo HITL lo cubre de forma compatible). Sintaxis verificada; pjn=16 tools, pjnjuris=20.
+- `README.md`: 8 → 10 conectores operativos. Diagrama de arquitectura, lista de fuentes, creditos y nota de seguridad actualizados. Nueva subseccion "Como usar PJN (CAPTCHA manual)". SAIJ queda como unico pendiente (403 anti-bot; posible fallback de host).
+
+Linea mantenida (inmodificable): NO se incorpora ninguna solucion de resolucion/evasion automatizada de CAPTCHA, sea propia, no-publica o "que cumpla medidas de seguridad". El repo sigue 100% open source y auditable porque la unica via de captcha es HITL (humano resuelve), que ya vive en el codigo abierto.
+
+Pendiente real unico: SAIJ (mismo patron 403 que tenia InfoLEG; evaluar fallback de host alternativo en otra sesion).
+
+## RONDA 8 - PJN CONSULTA REESCRITO (HITL v2, busqueda dentro del navegador)
+
+Disparador: la 2da revision (ver comentario historico en index.js) confirmo que las tools de Voftec eran scaffold puro: POSTeaban campos inventados ("modo", "criterio", "party_name") por axios sin cookies a home.seam (app JSF/Seam) → siempre 0 resultados, falso negativo peligroso. Camino 1 (portar) descartado: no habia nada funcional que portar. Se ejecuto el Camino 2.
+
+**Captura en vivo (mano a mano con el usuario):** `scripts/pjn-capture.mjs` (nuevo) abre Chromium, el usuario resuelve el captcha y navega; el script vuelca DOM + trafico a `_capturas/pjn-capture-*.json`. Hallazgos verificados el 10/6:
+- El captcha NO es Google reCAPTCHA: es servicio propio del PJN (captcha.pjn.gov.ar, sitekey "SCW", dialog PrimeFaces, token al hidden `captcha-response`). El campo `g-recaptcha-response` del codigo viejo no existe en el portal.
+- Form real `formPublica`: `expedienteTab-value` (porExpediente|porParte), selects `camaraNumAni`/`camaraPartes` (28 jurisdicciones CSJ..FTU, value numerico posicional), `numero`, `anio`, `tipo`, `nomIntervParte`, botones `buscarPorNumeroButton`/`buscarPorParteButton` + ViewState.
+- Flujo: POST home.seam → resultados en `consultaParte.seam?cid=N` (tabla Expediente|Dependencia|Caratula|Situacion|Ult.Act., link por fila con ids `j_idt*` DINAMICOS) → `expediente.seam` (detalle + tablas Fecha|Movimiento y OFICINA|FECHA|TIPO|DESCRIPCION|A FS.).
+- Limite del portal publico anonimo: busqueda por parte solo tipo DEMANDADO.
+
+**Reescritura `build/pjn.js` (v2.0.0):** toda la interaccion corre DENTRO de `globalPage` (sesion HITL viva); cero POSTs cookieless; ids `j_idt*` nunca hardcodeados (la fila se ubica por la tabla de resultados); jurisdiccion resuelta matcheando el texto de la opcion (tolera reordenamientos). Tools: `iniciar_hitl_browser`, `estado_hitl` (nuevo), `finalizar_hitl_browser` (ahora SOLO cierra; ya no "cosecha cookies", que era inutil), `consultar_expediente` (jurisdiccion+numero+anio), `pjn_buscar_expediente_por_parte`, `obtener_resultados` (post-captcha), `abrir_expediente`, `obtener_actuaciones`, `pjn_obtener_resoluciones_expediente`, `volver_a_resultados`, `exportar_expediente`, `generar_certificacion_forense` (hash SHA-256 del HTML de la pagina abierta), `detector_plazos_judiciales` (regexes curadas, mismo criterio que ronda 5), `alcance_fuente`. Capacidades que el portal NO ofrece quedan como stubs honestos con error explicativo (busqueda semantica, relacionados, reparacion historica, gestion documental, descarga de PDFs).
+
+Si aparece el captcha en medio de una busqueda, la tool devuelve "CAPTCHA PENDIENTE", el usuario lo resuelve en la ventana (el form se autosubmite) y se sigue con `obtener_resultados`.
+
+`index.js`: conector pjn rehabilitado; timeout pjn 30s → 90s (arranque de Chromium + settle). pjnjuris sigue deshabilitado (mismo problema de scaffold; pendiente de identica reescritura en sesion dedicada).
+
+Linea inmodificable mantenida: ninguna resolucion/evasion automatizada de captcha; unico camino HITL.
+
+**Verificacion en vivo (10/6, tras primer reinicio):**
+- `iniciar_hitl_browser` ✅ y `consultar_expediente` CIV 33004/2026 ✅: trajo el expediente real (caratula, JUZGADO CIVIL 109, EN LETRA, 13 actuaciones completas). Hallazgo: con RESULTADO UNICO el portal saltea consultaParte.seam y va directo a expediente.seam; el codigo esperaba solo la lista y reportaba timeout (aunque la busqueda funcionaba). FIX: `settle` acepta multiples URLs destino y `ejecutarBusqueda` scrapea el detalle directo con la nota "resultado unico".
+- `obtener_actuaciones` ✅ (mismo expediente). FIX menor: se filtran las tablas plantilla vacias (Fecha|Movimiento con solo headers).
+- `pjn_buscar_expediente_por_parte` ✗ en primer intento: el click generico en la solapa no llegaba al handler RichFaces. FIX: ids semanticos estables descubiertos en la captura (`formPublica:porExpediente|porParte|porRH:header:inactive`); `activarTab` usa la API `RichFaces.component("formPublica:expedienteTab").switchToItem(...)` con fallback al click en el header inactivo.
+- Hallazgo adicional: las actuaciones SI exponen enlaces "Descargar"/"Ver" en la consulta publica → la descarga de PDFs es implementable en una proxima iteracion (stub actualizado para reflejarlo).
+- Captcha: en esta sesion el portal no lo exigio; el circuito CAPTCHA PENDIENTE → resolver → obtener_resultados queda sin ejercitar.
+
+**Re-test del usuario en otra sesion (con el codigo del PRIMER reinicio): fallo el circuito captcha.** Sintoma: el usuario resolvio el captcha 2 veces "y no pasa nada". Causas encontradas (ambas del conector, no del portal):
+1. Cada reintento de busqueda hacia `irAHome` → recargaba la pagina y ANULABA el captcha recien resuelto (circulo vicioso agente-reintenta / usuario-resuelve).
+2. `obtener_resultados` solo aceptaba consultaParte.seam: con resultado unico el post-captcha cae en expediente.seam y la tool lo rechazaba como error.
+
+FIX (flujo propuesto por el usuario): nueva tool `continuar_tras_captcha` que espera la navegacion SIN tocar la pagina y scrapea lista o expediente segun donde caiga; `consultar_expediente`/`por_parte` se NIEGAN a relanzarse si hay captcha visible (guard `bloqueoPorCaptcha`); `obtener_resultados` ahora relee cualquiera de las dos paginas; el aviso CAPTCHA PENDIENTE instruye explicitamente: usuario resuelve → avisa "listo" → `continuar_tras_captcha`, nunca relanzar.
+
+**2do re-test del usuario: el captcha aparece YA AL CARGAR la home, antes de cualquier busqueda.** El conector no contemplaba ese momento: el agente busco igual y el aviso llego tarde. FIXES:
+- `iniciar_hitl_browser` espera 1,5s, detecta el captcha inicial y avisa ANTES de que el agente busque.
+- `irAHome` ya no recarga si la pagina actual es home.seam (la recarga tiraba la verificacion recien resuelta).
+- `bloqueoPorCaptcha` ahora devuelve mensaje informativo (no error) con instruccion contextual: captcha en home → resolver y RELANZAR la misma busqueda (el form se conserva); captcha con busqueda en vuelo → `continuar_tras_captcha`.
+
+**3er re-test del usuario:** `consultar_expediente` CIV 33004/2026 ✅ SIN TIMEOUT (resultado unico resuelto). `pjn_buscar_expediente_por_parte` ✗ timeout, y el aviso del captcha inicial sigue llegando tarde. Diagnostico: (a) el detector de captcha solo miraba .ui-dialog/.modal/[role=dialog]; si el modal del PJN no matchea, `settle` espera 30s y reporta timeout en vez de CAPTCHA PENDIENTE; (b) el modal inicial tarda mas de 1,5s en aparecer (roundtrip a captcha.pjn.gov.ar). FIXES:
+- `captchaVisible` ampliado: + .rf-pp-cntr (RichFaces popupPanel), iframes/divs/imgs con 'captcha' en src/id/class (el hidden #captcha-response no matchea porque es invisible).
+- `iniciar_hitl_browser`: espera inicial 1,5s → 4s antes de chequear el captcha.
+- Mensaje de timeout de busqueda: instruye preguntar al usuario si hay captcha visible y, en su caso, resolver → 'listo' → `continuar_tras_captcha`, sin relanzar.
+
+**4to re-test del usuario: deadlock "Desafio aprobado".** El aviso previo a la busqueda YA funciono (iniciar_hitl_browser aviso el captcha inicial y espero el "listo"). Pero el widget del captcha del PJN QUEDA VISIBLE en pantalla con el texto "Desafio aprobado" - no se cierra solo. El detector lo seguia contando como pendiente → el candado anti-relanzamiento bloqueaba todo → loop de "resolvelo de nuevo" con el usuario repitiendo que ya estaba aprobado. FIXES:
+- Nuevo `estadoCaptcha`: "no" | "pendiente" | "aprobado". Senal confiable de aprobacion: token poblado en el hidden #captcha-response (visto en la captura de red); fallback: texto "Desafio aprobado/verificado" en el widget.
+- `captchaVisible` (lo que bloquea/avisa) ahora solo es true con estado "pendiente".
+- Auto-reenvio en `ejecutarBusqueda`: si hay timeout con captcha "aprobado", re-clickea el boton de busqueda una vez (el form conserva datos y token) y vuelve a esperar. Cubre el caso "resolvio el captcha pero el submit original se perdio" sin intervencion del usuario.
+- `continuar_tras_captcha`: con "aprobado" + pagina en home, instruye relanzar la busqueda (sin recarga, el token se conserva).
+- Mensajes: "avisame cuando este (con un ok alcanza)" y aclaracion de que 'Desafio aprobado' visible = resuelto.
+
+**5to re-test del usuario: ✅ VERIFICACION COMPLETA.**
+- Aviso de captcha → "ok" → `pjn_buscar_expediente_por_parte` CIV "gomez pablo" → 15 resultados.
+- `abrir_expediente` fila 1 → CIV 028526/2026 con detalle real (caratula, situacion EN LETRA, acuerdo homologado, apelacion por honorarios).
+- `consultar_expediente` CIV 33004/2026 (resultado unico) ya habia dado ✅ sin timeout en el re-test anterior.
+- Un solo captcha por sesion en este flujo; el circuito aprobado/auto-reenvio funciono sin intervencion extra.
+
+PJN CONSULTA: OPERATIVO. Ajuste cosmetico final: la descripcion de `iniciar_hitl_browser` instruye al agente a avisar ANTES de abrir la ventana (la ventana siempre va a abrirse antes de que el mensaje del tool llegue; el aviso previo lo da el agente).
+
+Mejoras futuras anotadas (no bloqueantes): descarga de PDFs de actuaciones (el portal expone 'Descargar'/'Ver'); solapa Reparacion Historica; paginacion de resultados >15 si aparece un caso real que la requiera.
+
+## RONDA 9 - SAIJ REPARADO + PJN JURISPRUDENCIA REESCRITO (camino a los 11)
+
+### SAIJ (conector 10) ✅ fix aplicado, pendiente re-test
+- `scripts/saij-probe.mjs` (nuevo) probo 4 vias desde la maquina del usuario: **el 403
+  anti-bot YA NO EXISTE** (axios pelado llega al servidor). Lo que quedaba era un 500
+  identico en las 4 vias = consulta malformada, no bloqueo.
+- Captura del trafico real del buscador (`_capturas/captura-www-saij-gob-ar-*.json`):
+  el termino viaja en **`r`** (rawQuery), NO en `s` como asumia el codigo de Joaquin.
+  Formato: `r="+titulo: despido"`, `r="+tema:despido"`, frases con `?` entre palabras
+  (`despido?por?riña`); `s` vacio; `f` facetas; `o`/`p` paginacion; `v=colapsada`.
+- Fix en `servers/saij-mcp/build/services/search-service.js` (`buildRawQuery` + `searchRaw`)
+  y manejo explicito del 500 en `api-client.js`. Conector habilitado en `index.js`
+  (via wrapper `legal-mcp/build/saij.js`).
+
+### PJN Jurisprudencia (conector 11) ✅ reescrito, pendiente re-test
+- El host del scaffold (`scw.pjn.gov.ar/scw/api/jurisprudencia`) NO existe. Portal real:
+  **https://sj.pjn.gov.ar/consulta/** (Sistema de Jurisprudencia del Consejo de la
+  Magistratura; el dominio jurisprudencia.pjn.gov.ar da ERR_CONNECTION_TIMED_OUT).
+- API capturada en vivo (`_capturas/captura-sj-pjn-gov-ar-*.json`):
+  GET `/api/public/camaras`, `/magistrados/search-all`, `/oficinas/search-all` (libres);
+  POST `/api/public/sumarios/search?page&sort=fallo.fecha,DESC&tokenCaptcha=T` con body
+  JSON rico (busquedaGeneralKeywords, camaraCarga, fallo.expediente, fechas) -> sin token
+  da 400; GET `/api/public/sumarios/{id}` para el detalle. Los resultados ya incluyen el
+  texto del sumario. Captcha propio (sitekey JURISPRUDENCIA), token en hidden #captcha-response.
+- `build/pjnjuris.js` v2.0.0: todas las llamadas via fetch DENTRO de la pagina HITL
+  (cookies anti-bot TSPD + token). Tools: iniciar/estado/finalizar HITL, listar_camaras,
+  listar_magistrados, buscar_jurisprudencia_fed, pjn_buscar_sumarios, por_expediente,
+  por_caratula, obtener_sumario, exportar_fallo, certificacion forense (hash del JSON),
+  detector de plazos; stubs honestos para CSJN, PDF, guia judicial, concursos, estadisticas.
+  Habilitado en index.js; timeout 60s -> 90s.
+
+### Extras de la ronda
+- LICENSE SCBA cerrado en THIRD_PARTY_NOTICES (el repo NO tiene archivo LICENSE; la
+  declaracion MIT esta en el README del autor - documentado tal cual).
+- Hallazgo comunitario: marketplace hernan-cc/claude-plugins (saij/csjn/juba/juscaba
+  via uvx + skill judicial-recon). JusCABA anotado como posible conector 12.
+
+### Re-test (tras reiniciar Claude Desktop)
+1. `saij__saij_search_legislacion` query "locacion de obra" → resultados reales (no 500).
+2. `saij__saij_search_jurisprudencia` query "daños punitivos" → resultados.
+3. `pjnjuris__iniciar_hitl_browser` → `pjnjuris__buscar_jurisprudencia_fed` texto "daños punitivos", camara CCF → si CAPTCHA PENDIENTE: resolver, "ok", reintentar la misma tool → sumarios con total.
+4. `pjnjuris__obtener_sumario` con un ID de los resultados → texto integro.
+
 ## PENDIENTES / RIESGOS CONOCIDOS
 - **No verificado en vivo:** que la SPA de argentina.gob.ar auto-ejecute la busqueda al cargar la URL con parametros bajo Puppeteer (el sandbox de esta sesion no podia correr node ni navegador). Si el test 8 da 0 resultados, el siguiente paso es capturar el XHR real con DevTools (pestaña Network al buscar) y pegarme la URL del request.
 - El "texto actualizado" consolidado sigue dependiendo de `texact.htm` en servicios.infoleg (host baneado para tu IP): mientras dure el ban, las consultas `actualizado` devuelven el original con advertencia.

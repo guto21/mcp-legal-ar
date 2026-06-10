@@ -858,44 +858,63 @@ async function resolveTextUrlFromVerNorma(idNorma, tipoTexto, fetcher = fetchInf
 // Limitacion: publica el texto ORIGINAL; el consolidado vive solo en texact.htm.
 // ---------------------------------------------------------------------------
 export async function fetchTextoFromArgentinaGobAr(idNorma, tipoTexto = "actualizado") {
-    const url = `${ARGENTINA_BASE_URL}/normativa/nacional/${idNorma}/texto`;
-    const html = await fetchOfficialHtml(url);
-    assertNotWafPage(html, url);
-    const $ = cheerio.load(html);
-    const title = normalizeText($("title").text());
-    // Si la norma no tiene texto cargado, el sitio sirve la ficha RESUMEN.
-    if (!/TEXTO/i.test(title)) {
-        throw new Error(`argentina.gob.ar no publica el texto de la norma ${idNorma} (devolvio la ficha resumen).`);
-    }
-    $("script, style, noscript, iframe, nav, header, footer").remove();
-    $(".sidebar, #sidebar, .region-sidebar-first, .region-sidebar-second, .breadcrumb, .pane-share-buttons").remove();
-    const candidates = ["main", "#main-content", ".region-content", "article", "body"];
-    let containerHtml = "";
-    for (const sel of candidates) {
-        const node = $(sel).first();
-        if (node.length && normalizeText(node.text()).length > 400) {
-            containerHtml = $.html(node);
-            break;
+    // DESCUBRIMIENTO (10/6/26, 2da tanda): /normativa/nacional/{id}/actualizacion
+    // sirve el TEXTO CONSOLIDADO server-rendered, con notas de reforma articulo
+    // por articulo (verificado: Codigo Penal id 16546 - el art. 1 incluye la
+    // sustitucion por Ley 27.401). La ruta existe solo si InfoLEG tiene texact;
+    // si no, se cae al texto original con advertencia.
+    const rutas = tipoTexto === "actualizado"
+        ? [
+            { path: "actualizacion", esperado: /TEXTO ACTUALIZADO/i, variante: "actualizado" },
+            { path: "texto", esperado: /TEXTO/i, variante: "original" }
+        ]
+        : [{ path: "texto", esperado: /TEXTO/i, variante: "original" }];
+    let lastErr = null;
+    for (const ruta of rutas) {
+        const url = `${ARGENTINA_BASE_URL}/normativa/nacional/${idNorma}/${ruta.path}`;
+        try {
+            const html = await fetchOfficialHtml(url);
+            assertNotWafPage(html, url);
+            const $ = cheerio.load(html);
+            const title = normalizeText($("title").text());
+            // Si la variante no existe, el sitio devuelve vacio o la ficha RESUMEN.
+            if (!ruta.esperado.test(title)) {
+                throw new Error(`argentina.gob.ar no publica texto ${ruta.variante} para la norma ${idNorma} en /${ruta.path} (titulo: "${title.slice(0, 80)}").`);
+            }
+            $("script, style, noscript, iframe, nav, header, footer").remove();
+            $(".sidebar, #sidebar, .region-sidebar-first, .region-sidebar-second, .breadcrumb, .pane-share-buttons").remove();
+            const candidates = ["main", "#main-content", ".region-content", "article", "body"];
+            let containerHtml = "";
+            for (const sel of candidates) {
+                const node = $(sel).first();
+                if (node.length && normalizeText(node.text()).length > 400) {
+                    containerHtml = $.html(node);
+                    break;
+                }
+            }
+            if (!containerHtml)
+                containerHtml = $.html($("body"));
+            let text = cleanInfoLegHtml(containerHtml);
+            // Recortar menues residuales del pie del portal.
+            text = text
+                .replace(/#?\s*Acerca de esta norma[\s\S]*$/i, "")
+                .replace(/##\s*Tr[áa]mites[\s\S]*$/i, "")
+                .trim();
+            if (text.length < 300 || !/ART[IÍ]CULO|DECRETA|RESUELVE|SANCIONAN/i.test(text)) {
+                throw new Error(`El texto extraido de argentina.gob.ar para la norma ${idNorma} (/${ruta.path}) no parece un cuerpo normativo valido.`);
+            }
+            let advertencia = "";
+            if (tipoTexto === "actualizado" && ruta.variante === "original") {
+                advertencia = `argentina.gob.ar no publica texto consolidado para esta norma; se entrega el TEXTO ORIGINAL. ` +
+                    `Verifique reformas posteriores en ${ARGENTINA_BASE_URL}/normativa/nacional/${idNorma}/normas-modifican antes de citar articulado.`;
+            }
+            return { text, url, advertencia, variante: ruta.variante };
+        }
+        catch (err) {
+            lastErr = err;
         }
     }
-    if (!containerHtml)
-        containerHtml = $.html($("body"));
-    let text = cleanInfoLegHtml(containerHtml);
-    // Recortar menues residuales del pie del portal.
-    text = text
-        .replace(/#?\s*Acerca de esta norma[\s\S]*$/i, "")
-        .replace(/##\s*Tr[áa]mites[\s\S]*$/i, "")
-        .trim();
-    if (text.length < 300 || !/ART[IÍ]CULO|DECRETA|RESUELVE|SANCIONAN/i.test(text)) {
-        throw new Error(`El texto extraido de argentina.gob.ar para la norma ${idNorma} no parece un cuerpo normativo valido.`);
-    }
-    let advertencia = "";
-    if (tipoTexto === "actualizado") {
-        advertencia = `argentina.gob.ar publica el TEXTO ORIGINAL de la norma. El texto consolidado/actualizado ` +
-            `no pudo obtenerse de servicios.infoleg.gob.ar. Verifique reformas posteriores en ` +
-            `${ARGENTINA_BASE_URL}/normativa/nacional/${idNorma}/normas-modifican antes de citar articulado.`;
-    }
-    return { text, url, advertencia };
+    throw lastErr ?? new Error(`argentina.gob.ar no publica el texto de la norma ${idNorma}.`);
 }
 async function fetchCleanText(idNorma, textoHtmlManual, tipoTexto = "actualizado") {
     if (textoHtmlManual && textoHtmlManual.trim().length > 0) {
@@ -1330,6 +1349,35 @@ export function registerAllTools(server) {
             }
             return { content: [{ type: "text", text: `Error al buscar normativa avanzada: ${error.message}` }], isError: true };
         }
+    });
+    server.tool("localizar_codigo", "Resuelve el ID InfoLEG de los CODIGOS y leyes troncales argentinas (Codigo Penal, Codigo Civil y Comercial, LCT, CPCCN, Codigo Aduanero). USAR SIEMPRE esta tool antes que buscar_normativa cuando se pida un codigo: la busqueda por texto libre entierra los codigos bajo miles de normas recientes que los mencionan. IDs verificados contra la fuente oficial el 10/6/2026.", {
+        codigo: z.string().describe("Nombre del codigo o ley troncal (ej. 'Codigo Penal', 'CCyC', 'LCT', 'codigo aduanero')")
+    }, async (args) => {
+        // IDs verificados uno por uno via obtener_metadatos_norma contra
+        // argentina.gob.ar/normativa/nacional/{id} (10/6/2026).
+        const CODIGOS = [
+            { claves: ["codigo penal", "cp", "cod penal", "codigo penal de la nacion"], nombre: "Código Penal de la Nación", ley: "Ley 11.179 (t.o. 1984)", id: "16546" },
+            { claves: ["codigo civil y comercial", "ccyc", "ccycn", "codigo civil", "ccc"], nombre: "Código Civil y Comercial de la Nación", ley: "Ley 26.994", id: "235975" },
+            { claves: ["ley de contrato de trabajo", "lct", "contrato de trabajo", "regimen de contrato de trabajo"], nombre: "Régimen de Contrato de Trabajo", ley: "Ley 20.744 (t.o. 1976)", id: "25552" },
+            { claves: ["codigo procesal civil y comercial", "cpccn", "cpcc", "codigo procesal civil"], nombre: "Código Procesal Civil y Comercial de la Nación", ley: "Ley 17.454 (t.o. 1981)", id: "16547" },
+            { claves: ["codigo aduanero"], nombre: "Código Aduanero", ley: "Ley 22.415", id: "16536" },
+        ];
+        const norm = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+        const pedido = norm(args.codigo);
+        const hit = CODIGOS.find((c) => c.claves.some((k) => pedido === k || pedido.includes(k) || k.includes(pedido)));
+        if (!hit) {
+            let out = `No tengo verificado el ID InfoLEG de "${args.codigo}". Códigos disponibles en esta tool:\n\n`;
+            CODIGOS.forEach((c) => { out += `- ${c.nombre} — ${c.ley} — idNorma \`${c.id}\`\n`; });
+            out += `\nPara otros códigos use \`buscar_norma_por_tipo_numero_anio\` con tipo "Ley" y el número de la ley aprobatoria (sin año), y verifique el resultado antes de citar.`;
+            return { content: [{ type: "text", text: out }] };
+        }
+        let out = `# ${hit.nombre}\n\n`;
+        out += `- **Norma aprobatoria:** ${hit.ley}\n`;
+        out += `- **idNorma InfoLEG:** \`${hit.id}\` (verificado contra la fuente oficial)\n`;
+        out += `- **Ficha:** ${ARGENTINA_BASE_URL}/normativa/nacional/${hit.id}\n`;
+        out += `- **Texto actualizado:** ${ARGENTINA_BASE_URL}/normativa/nacional/${hit.id}/actualizacion\n\n`;
+        out += `Para leer el articulado vigente: \`obtener_texto_norma\` con idNorma \`${hit.id}\` y tipoTexto \`actualizado\` (incluye las notas de sustitución por reformas). El texto original conserva la redacción histórica y NO debe citarse como vigente.`;
+        return { content: [{ type: "text", text: out }] };
     });
     server.tool("buscar_norma_por_tipo_numero_anio", "Busca una norma especifica cuando el humano dice algo como 'Ley 27430 de 2017' o 'Decreto 216/2026'.", {
         tipoNorma: z.string().describe("Tipo de norma: Ley, Decreto, Resolucion, Disposicion, DNU, etc."),

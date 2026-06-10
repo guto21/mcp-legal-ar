@@ -1,654 +1,670 @@
 #!/usr/bin/env node
+/**
+ * pjn.js - Conector PJN Consulta (scw.pjn.gov.ar) - REESCRITURA 10/06/2026
+ *
+ * Arquitectura: toda la interaccion corre DENTRO del navegador HITL (globalPage).
+ * El portal es JSF/Seam (RichFaces 4.3 + PrimeFaces): ViewState, conversacion (cid)
+ * y captcha propio (captcha.pjn.gov.ar, sitekey SCW) viven en el browser; no se
+ * hace ningun POST cookieless. El captcha lo resuelve SIEMPRE el usuario (HITL).
+ *
+ * Estructura del portal (capturada en vivo el 10/06/2026, _capturas/pjn-capture-*.json):
+ *   home.seam        form "formPublica": expedienteTab-value (porExpediente|porParte),
+ *                    camaraNumAni / camaraPartes (28 jurisdicciones), numero, anio,
+ *                    tipo (solo DEMANDADO en consulta publica), nomIntervParte,
+ *                    buscarPorNumeroButton / buscarPorParteButton, captcha-response.
+ *   consultaParte.seam  tabla resultados: Expediente|Dependencia|Caratula|Situacion|Ult.Act.
+ *                       con link "ver" por fila (ids j_idt* dinamicos: NO hardcodear).
+ *   expediente.seam     detalle + tablas (Fecha|Movimiento) y actuaciones
+ *                       (OFICINA|FECHA|TIPO|DESCRIPCION/DETALLE|A FS.).
+ */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import axios from "axios";
-import * as cheerio from "cheerio";
 import crypto from "crypto";
-import https from "https";
 
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
-const axiosClient = axios.create({ httpsAgent });
+const HOME_URL = "https://scw.pjn.gov.ar/scw/home.seam";
 let globalBrowser = null;
 let globalPage = null;
+
+// Jurisdicciones (codigo -> texto verificado en el select del portal). El value
+// numerico se resuelve en runtime matcheando el texto de la opcion, para tolerar
+// reordenamientos del select.
+const JURISDICCIONES = ["CSJ", "CIV", "CAF", "CCF", "CNE", "CSS", "CPE", "CNT", "CFP", "CCC", "COM", "CPF", "CPN", "FBB", "FCR", "FCB", "FCT", "FGR", "FLP", "FMP", "FMZ", "FPO", "FPA", "FRE", "FSA", "FRO", "FSM", "FTU"];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const txt = (t) => ({ content: [{ type: "text", text: t }] });
+const err = (t) => ({ content: [{ type: "text", text: t }], isError: true });
+
+const AVISO_SIN_SESION = "No hay sesion HITL activa. Ejecuta iniciar_hitl_browser, resolve el captcha cuando aparezca y reintenta.";
+const AVISO_CAPTCHA = "CAPTCHA PENDIENTE. Decile al usuario: 'Resolve el captcha en la ventana de Chromium y avisame cuando este (con un ok alcanza)'. Cuando confirme, llama a continuar_tras_captcha. Nota: el widget puede quedar visible diciendo 'Desafio aprobado'; eso ES resuelto. IMPORTANTE: NO relances la busqueda mientras el captcha este pendiente.";
+
+function pageViva() {
+    return globalBrowser && globalPage && !globalPage.isClosed();
+}
+
+async function getPage() {
+    if (!pageViva()) throw new Error(AVISO_SIN_SESION);
+    return globalPage;
+}
+
+/**
+ * Estado del captcha: "no" | "pendiente" | "aprobado".
+ * Clave (verificado en vivo): el widget del PJN QUEDA VISIBLE con "Desafio aprobado"
+ * tras resolverlo; no se cierra solo. La senal confiable de aprobacion es el token
+ * en el hidden #captcha-response (poblado por captcha.pjn.gov.ar al aprobar).
+ */
+async function estadoCaptcha(page) {
+    try {
+        return await page.evaluate(() => {
+            const vis = (el) => {
+                const st = getComputedStyle(el);
+                return st.display !== "none" && st.visibility !== "hidden" && el.offsetHeight > 10;
+            };
+            const cont = [...document.querySelectorAll(".ui-dialog, .modal, [role='dialog'], .rf-pp-cntr, iframe[src*='captcha'], div[id*='captcha'], div[class*='captcha'], img[src*='captcha']")].filter(vis);
+            if (!cont.length) return "no";
+            const resp = document.getElementById("captcha-response") || document.querySelector("input[name='captcha-response']");
+            if (resp && typeof resp.value === "string" && resp.value.length > 5) return "aprobado";
+            const texto = cont.map((c) => { try { return c.tagName === "IFRAME" ? "" : (c.textContent || ""); } catch { return ""; } }).join(" ");
+            if (/desaf[ií]o\s+aprobado|aprobad[oa]|verificad[oa]/i.test(texto)) return "aprobado";
+            return "pendiente";
+        });
+    } catch { return "no"; } // contexto destruido = navegacion en curso
+}
+
+async function captchaVisible(page) {
+    return (await estadoCaptcha(page)) === "pendiente";
+}
+
+/** Espera a que el click decante en: navegacion a alguna expectUrls | captcha | timeout. */
+async function settle(page, { expectUrls = [], timeoutMs = 30000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        await sleep(600);
+        let url = "";
+        try { url = page.url(); } catch { continue; }
+        if (expectUrls.some((u) => url.includes(u))) {
+            try { await page.waitForFunction(() => document.readyState === "complete", { timeout: 8000 }); } catch { /* seguir */ }
+            return { status: "ok", url };
+        }
+        if (await captchaVisible(page)) return { status: "captcha", url };
+    }
+    return { status: "timeout", url: (() => { try { return page.url(); } catch { return "?"; } })() };
+}
+
+/**
+ * Lleva a la home publica SOLO si no estamos ya en ella, y espera el form.
+ * No recargar si ya estamos en home: una recarga tira la verificacion captcha
+ * que el usuario pueda haber resuelto recien (causa del circulo vicioso del re-test).
+ */
+async function irAHome(page) {
+    if (!urlEs(page, "home.seam")) {
+        await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+    }
+    await page.waitForSelector("#formPublica", { timeout: 20000 });
+}
+
+/**
+ * Activa una solapa del tabPanel "formPublica:expedienteTab" por su nombre de item
+ * (ids semanticos verificados en vivo: porExpediente | porParte | porRH).
+ * Via 1: API RichFaces switchToItem. Via 2: click en el header inactivo.
+ */
+async function activarTab(page, itemTab, selectorCampo) {
+    await page.evaluate((item) => {
+        try {
+            const rf = window.RichFaces;
+            const comp = rf && rf.component ? rf.component("formPublica:expedienteTab") : null;
+            if (comp && typeof comp.switchToItem === "function") { comp.switchToItem(item); return; }
+        } catch { /* caer al click */ }
+        const hdr = document.getElementById(`formPublica:${item}:header:inactive`);
+        if (hdr) hdr.click();
+    }, itemTab);
+    await page.waitForFunction((sel) => {
+        const el = document.querySelector(sel);
+        return el && (el.offsetWidth || el.offsetHeight);
+    }, { timeout: 15000 }, selectorCampo).catch(() => {
+        throw new Error(`No pude activar la solapa "${itemTab}" (campo ${selectorCampo} no visible).`);
+    });
+}
+
+/** Setea un select matcheando el codigo de jurisdiccion contra el texto de la opcion. */
+async function setJurisdiccion(page, selectName, codigo) {
+    const ok = await page.evaluate((name, cod) => {
+        const sel = document.getElementById(name) || document.querySelector(`select[name="${name}"]`);
+        if (!sel) return false;
+        const opt = [...sel.options].find((o) => (o.textContent || "").trim().toUpperCase().startsWith(cod.toUpperCase() + " -"));
+        if (!opt) return false;
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    }, selectName, codigo);
+    if (!ok) throw new Error(`Jurisdiccion "${codigo}" no encontrada en el select ${selectName}.`);
+}
+
+async function setCampo(page, name, valor) {
+    const ok = await page.evaluate((n, v) => {
+        const el = document.getElementById(n) || document.querySelector(`[name="${n}"]`);
+        if (!el) return false;
+        el.value = v;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    }, name, valor);
+    if (!ok) throw new Error(`Campo ${name} no encontrado.`);
+}
+
+async function clickPorId(page, id) {
+    const ok = await page.evaluate((i) => {
+        const el = document.getElementById(i) || document.querySelector(`[name="${i}"]`);
+        if (!el) return false;
+        el.click();
+        return true;
+    }, id);
+    if (!ok) throw new Error(`Boton ${id} no encontrado.`);
+}
+
+/** Scrapea la tabla de resultados de consultaParte.seam. */
+async function scrapeResultados(page) {
+    return page.evaluate(() => {
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const tablas = [...document.querySelectorAll("table")].filter((t) =>
+            [...t.querySelectorAll("th")].some((th) => /expediente/i.test(th.textContent || "")));
+        const t = tablas[0];
+        if (!t) {
+            return { encontrada: false, avisoPortal: clean(document.body.innerText).slice(0, 1200), url: location.href };
+        }
+        const headers = [...t.querySelectorAll("th")].map((th) => clean(th.textContent)).filter(Boolean);
+        const filas = [...t.querySelectorAll("tbody tr")].map((tr, i) => ({
+            fila: i,
+            celdas: [...tr.cells].map((c) => clean(c.textContent)),
+            abrible: !!tr.querySelector("a"),
+        })).filter((f) => f.celdas.some(Boolean));
+        const scroller = document.querySelector(".rf-ds, .ui-paginator");
+        return {
+            encontrada: true, url: location.href, headers, filas,
+            paginacion: scroller ? clean(scroller.textContent) : null,
+        };
+    });
+}
+
+function formatearResultados(res, contexto) {
+    if (!res.encontrada) {
+        return `# PJN - ${contexto}\n\nNo se encontro la tabla de resultados en ${res.url}.\n\n**Texto visible del portal (puede contener el motivo - ej. sin resultados, captcha, error):**\n\n${res.avisoPortal}`;
+    }
+    let out = `# PJN - ${contexto}\n\n**Origen:** ${res.url}\n**Resultados en pagina:** ${res.filas.length}${res.paginacion ? `\n**Paginacion:** ${res.paginacion}` : ""}\n\n`;
+    out += `| fila | ${res.headers.join(" | ")} |\n|${"---|".repeat(res.headers.length + 1)}\n`;
+    for (const f of res.filas) {
+        out += `| ${f.fila} | ${f.celdas.slice(0, res.headers.length).join(" | ")} |\n`;
+    }
+    out += `\nPara ver un expediente: \`abrir_expediente\` con \`fila\` (0 a ${res.filas.length - 1}).`;
+    return out;
+}
+
+/** Scrapea la pagina de detalle expediente.seam (generico, tolera cambios de ids). */
+async function scrapeExpediente(page) {
+    return page.evaluate(() => {
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const out = { url: location.href, titulo: document.title, encabezado: "", tablas: [] };
+        const bodyText = document.body.innerText || "";
+        const corte = bodyText.search(/OFICINA\s+FECHA|Fecha\s+Movimiento/i);
+        out.encabezado = clean(corte > 0 ? bodyText.slice(0, corte) : bodyText.slice(0, 1500)).slice(0, 2000);
+        for (const t of document.querySelectorAll("table")) {
+            const headers = [...t.querySelectorAll("th")].map((th) => clean(th.textContent)).filter(Boolean);
+            if (!headers.length) continue;
+            const headerKey = headers.join("|").toLowerCase();
+            const filas = [...t.querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((c) => clean(c.textContent)))
+                .filter((f) => f.some(Boolean))
+                // descarta filas que son solo el header repetido (tablas plantilla vacias)
+                .filter((f) => f.join("|").toLowerCase() !== headerKey && f.join(" ").toLowerCase() !== headerKey.replace(/\|/g, " "));
+            if (filas.length) out.tablas.push({ headers, filas: filas.slice(0, 150), total: filas.length });
+        }
+        return out;
+    });
+}
+
+function formatearExpediente(det, { soloResoluciones = false } = {}) {
+    let out = `# PJN - Expediente\n\n**Origen:** ${det.url}\n\n## Datos del expediente\n${det.encabezado}\n`;
+    for (const t of det.tablas) {
+        let filas = t.filas;
+        if (soloResoluciones) {
+            filas = filas.filter((f) => f.some((c) => /resoluci|sentencia|auto|interlocutori|despacho|fallo/i.test(c)));
+            if (!filas.length) continue;
+        }
+        out += `\n## Tabla: ${t.headers.join(" | ")}\n\n| ${t.headers.join(" | ")} |\n|${"---|".repeat(t.headers.length)}\n`;
+        for (const f of filas) out += `| ${f.slice(0, t.headers.length).join(" | ")} |\n`;
+        if (t.total > t.filas.length) out += `\n*(${t.total} filas en total; se muestran ${t.filas.length})*\n`;
+    }
+    if (soloResoluciones) out += `\n> Filtrado heuristico por TIPO/DESCRIPCION (resolucion, sentencia, auto, interlocutorio, despacho, fallo). Para el listado completo usa obtener_actuaciones.`;
+    return out;
+}
+
+/** Estamos en pagina de resultados? de expediente? */
+function urlEs(page, fragmento) {
+    try { return page.url().includes(fragmento); } catch { return false; }
+}
+
+/** Scrapea segun la pagina actual: lista de resultados o detalle de expediente. */
+async function scrapeSegunPagina(page, contexto) {
+    if (urlEs(page, "expediente.seam")) {
+        const det = await scrapeExpediente(page);
+        return txt(formatearExpediente(det));
+    }
+    if (urlEs(page, "consultaParte.seam")) {
+        const res = await scrapeResultados(page);
+        return txt(formatearResultados(res, contexto));
+    }
+    return null;
+}
+
+/**
+ * Si hay captcha en pantalla, la busqueda no debe ejecutarse todavia.
+ * Devuelve un mensaje informativo (no error) con la instruccion segun el contexto:
+ * - captcha en la home (antes de buscar): el usuario resuelve y se RELANZA la
+ *   misma busqueda (la pagina no se recarga, el formulario se conserva).
+ * - captcha en medio de una busqueda en vuelo: continuar_tras_captcha.
+ */
+async function bloqueoPorCaptcha(page) {
+    if (await captchaVisible(page)) {
+        if (urlEs(page, "home.seam")) {
+            return txt("CAPTCHA EN LA PAGINA DE BUSQUEDA. Decile al usuario: 'Resolve el captcha en la ventana de Chromium y avisame cuando este (con un ok alcanza)'. Cuando confirme, RELANZA esta misma busqueda con los mismos parametros (la pagina no se recarga; el formulario y la verificacion se conservan). Si el widget dice 'Desafio aprobado', ya esta resuelto: relanza directamente.");
+        }
+        return txt(AVISO_CAPTCHA);
+    }
+    return null;
+}
+
+async function ejecutarBusqueda(page, contexto, botonId) {
+    // Con resultado unico el portal saltea la lista y va directo a expediente.seam
+    // (verificado en vivo 10/6/26 con CIV 33004/2026).
+    let r = await settle(page, { expectUrls: ["consultaParte.seam", "expediente.seam"] });
+    // Caso "Desafio aprobado": el usuario resolvio el captcha antes/durante el click,
+    // el token quedo en #captcha-response pero el submit original se perdio.
+    // Auto-reenvio: re-click del boton (el form conserva datos y token).
+    if (r.status === "timeout" && botonId && (await estadoCaptcha(page)) === "aprobado") {
+        await clickPorId(page, botonId).catch(() => { /* si no esta, sigue el timeout */ });
+        r = await settle(page, { expectUrls: ["consultaParte.seam", "expediente.seam"] });
+    }
+    if (r.status === "captcha") return txt(`# PJN - ${contexto}\n\n${AVISO_CAPTCHA}`);
+    if (r.status === "timeout") {
+        // Puede haber quedado en home con captcha no detectado o error de validacion
+        const aviso = await page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 800)).catch(() => "");
+        return err(`# PJN - ${contexto}\n\nLa busqueda no llego a la pagina de resultados (timeout). URL actual: ${r.url}\n\n**Texto visible:** ${aviso}\n\n**Que hacer:** pregunta al usuario si en la ventana de Chromium hay un captcha o verificador visible. Si lo hay: que lo resuelva, avise 'listo', y entonces llama a continuar_tras_captcha (NO relances la busqueda).`);
+    }
+    if (r.url.includes("expediente.seam")) {
+        const det = await scrapeExpediente(page);
+        return txt(`> Resultado unico: el portal abrio el expediente directamente (sin lista intermedia).\n\n` + formatearExpediente(det));
+    }
+    const res = await scrapeResultados(page);
+    return txt(formatearResultados(res, contexto));
+}
+
 export function registerAllTools(server) {
-    // Tool: consultar_expediente
-    server.tool("consultar_expediente", "Consulta el estado de expedientes judiciales federales por jurisdicción, cámara, número o año.", {
-        criterio: z.string().describe("Criterio o término de búsqueda legal (ej. 'maternidad', número de expediente)"),
-        pagina: z.number().optional().default(1).describe("Número de página para paginación"),
-        captchaToken: z.string().describe("Token de Google reCAPTCHA resuelto externamente")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                criterio: args.criterio,
-                pagina: args.pagina.toString(),
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let resultText = `# Poder Judicial de la Nación (PJN) - Consulta - Resultados de consultar_expediente\n\n`;
-            resultText += `**Búsqueda:** ${args.criterio}\n`;
-            resultText += `**Origen:** ${targetUrl}\n`;
-            resultText += `**Título de la página:** ${title}\n\n`;
-            resultText += `### Contenido Extraído:\n${textContent}\n`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en consultar_expediente: ${message}` }], isError: true };
-        }
-    });
-    // Tool: pjn_buscar_expediente_por_parte
-    server.tool("pjn_buscar_expediente_por_parte", "Busca expedientes judiciales filtrando por el nombre exacto de las partes involucradas (actor, demandado, imputado).", {
-        party_name: z.string().describe("Nombre y apellido o razón social de una de las partes. Debe ser lo más exacto posible."),
-        jurisdiction_id: z.enum(["CSJ", "CIV", "CAF", "CCF", "CNE", "CSS", "CPE", "CNT", "CFP", "CCC", "COM", "CPF", "CPN", "FBB", "FCR", "FCB", "FCT", "FGR", "FLP", "FMP", "FMZ", "FPO", "FPA", "FRE", "FSA", "FRO", "FSM", "FTU"]).describe("ID de la jurisdicción obligatoria para limitar la búsqueda."),
-        tipo_parte: z.enum(["ACTOR", "AFILIADO", "AGRUPACION_POLITICA", "AMICUS_CURIAE", "AUTORIDAD_DE_MESA", "AUTORIDAD_PARTIDARIA", "CANDIDATO", "CAUSANTE", "CIUDADANO", "CONCURSADO", "CUERPO_COLEGIADO", "DAMNIFICADO", "DEMANDADO", "DENUNCIADO", "DENUNCIANTE", "EJECUTADO_S", "EJECUTANTE_S", "EMPLEADO_PUBLICO", "FALLIDO", "FUNCIONARIO_PUBLICO", "HEREDERO_S", "IMPUTADO", "INCIDENTISTA", "INTERVENTOR_JUDICIAL", "INTERVENTOR_PARTIDARIO", "JUNTA_ELECTORAL_PARTIDARIA", "LISTA_DE_CANDIDATOS_PARTIDARIOS", "LISTA_DE_PRECANDIDATOS_O_CANDIDATOS", "ONG", "ORGANISMO_PUBLICO", "PETICIONANTE", "PRECANDIDATO", "PRESUNTO_FALLIDO", "QUERELLANTE", "REQUERIDO", "REQUIRENTE", "SINDICO", "SOLICITANTE", "TERCERO_AUTONOMO_PRINCIPAL", "VOLUNTARIO"]).optional().describe("Tipo de parte para filtrar resultados (40 tipos disponibles)."),
-        captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                modo: "parte",
-                party_name: args.party_name,
-                jurisdiction_id: args.jurisdiction_id,
-                tipo_parte: args.tipo_parte || "",
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let resultText = `# PJN - Consulta por Parte\n\n`;
-            resultText += `**Parte:** ${args.party_name}\n`;
-            resultText += `**Jurisdicción:** ${args.jurisdiction_id}\n`;
-            resultText += `**Título:** ${title}\n\n`;
-            resultText += `### Contenido Extraído:\n${textContent}\n`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en pjn_buscar_expediente_por_parte: ${message}` }], isError: true };
-        }
-    });
-    // Tool: pjn_obtener_resoluciones_expediente
-    server.tool("pjn_obtener_resoluciones_expediente", "Obtiene únicamente las resoluciones, autos y sentencias de un expediente, filtrando los trámites de mero avance.", {
-        expediente_id: z.string().describe("Identificador interno único del expediente devuelto por las búsquedas."),
-        captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                modo: "resoluciones",
-                expediente_id: args.expediente_id,
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let resultText = `# PJN - Resoluciones del Expediente\n\n`;
-            resultText += `**Expediente ID:** ${args.expediente_id}\n`;
-            resultText += `**Título:** ${title}\n\n`;
-            resultText += `### Resoluciones Extraídas:\n${textContent}\n`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en pjn_obtener_resoluciones_expediente: ${message}` }], isError: true };
-        }
-    });
-    // Tool: pjn_descargar_documento_actuacion
-    server.tool("pjn_descargar_documento_actuacion", "Descarga el documento PDF original adjunto a una actuación procesal específica.", {
-        actuacion_id: z.string().describe("ID interno de la actuación que contiene el documento, devuelto al listar las actuaciones."),
-        captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                modo: "descargar_documento",
-                actuacion_id: args.actuacion_id,
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                responseType: "arraybuffer"
-            });
-            let resultText = "# PJN - Descarga de Documento\n\n";
-            resultText += `**Actuación ID:** ${args.actuacion_id}\n`;
-            resultText += `**Estado:** Descargado exitosamente\n`;
-            resultText += `**Tamaño:** ${response.data.byteLength} bytes\n`;
-            resultText += `**Nota:** El contenido binario del PDF ha sido descargado. Para visualizar, use un visor de PDF.`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en pjn_descargar_documento_actuacion: ${message}` }], isError: true };
-        }
-    });
-    // Tool: obtener_actuaciones (original, kept for compatibility)
-    server.tool("obtener_actuaciones", "Lista las últimas actuaciones judiciales y resoluciones cargadas en el expediente.", {
-        criterio: z.string().describe("Criterio o término de búsqueda legal (ej. 'maternidad', número de expediente)"),
-        pagina: z.number().optional().default(1).describe("Número de página para paginación"),
-        captchaToken: z.string().describe("Token de Google reCAPTCHA resuelto externamente")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                criterio: args.criterio,
-                pagina: args.pagina.toString(),
-                action: "actuaciones",
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let resultText = `# Poder Judicial de la Nación (PJN) - Consulta - Resultados de obtener_actuaciones\n\n`;
-            resultText += `**Búsqueda:** ${args.criterio}\n`;
-            resultText += `**Origen:** ${targetUrl}\n`;
-            resultText += `**Título de la página:** ${title}\n\n`;
-            resultText += `### Contenido Extraído:\n${textContent}\n`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en obtener_actuaciones: ${message}` }], isError: true };
-        }
-    });
-    // Tool: alcance_fuente
-    server.tool("alcance_fuente", "Informa las capacidades, fuentes de datos, limitaciones y disclaimer del conector pjn-consulta-mcp.", {}, async () => {
-        const text = `# Alcance y Fuentes - Poder Judicial de la Nación (PJN) - Consulta\n\n## Datos del Conector\n- **Servidor:** pjn-consulta-mcp\n- **Fuente Legal:** Poder Judicial de la Nación (PJN) - Consulta\n- **URL Oficial:** https://www.pjn.gov.ar/\n- **Viabilidad Estimada:** 🟡 Baja-Media (reCAPTCHA)\n\n### Advertencias de Seguridad\n> ⚠️ ADVERTENCIA DE SEGURIDAD: Este portal está protegido por Google reCAPTCHA. Las consultas en vivo requieren el paso del parámetro captchaToken.\n\n## Herramientas Ofrecidas\n- \`consultar_expediente\`: Consulta el estado de expedientes judiciales federales por jurisdicción, cámara, número o año.\n- \`obtener_actuaciones\`: Lista las últimas actuaciones judiciales y resoluciones cargadas en el expediente.\n- \`alcance_fuente\`: Este informe de alcance y cobertura.\n\n## Aviso Legal\nEste servidor es un conector automatizado con fines de investigación legal y no constituye asesoramiento profesional. Las consultas se realizan sobre portales oficiales públicos de la República Argentina.`;
-        return { content: [{ type: "text", text: text }] };
-    });
-    // Tool: iniciar_hitl_browser
-    server.tool("iniciar_hitl_browser", "Abre un navegador interactivo (HITL) para resolver el Captcha manualmente en PJN Consulta.", {}, async () => {
-        if (globalBrowser) {
-            return { content: [{ type: "text", text: "El navegador ya está abierto. Por favor resuelve el Captcha en la ventana de Chromium y escribe 'Listo' al usuario, luego usa finalizar_hitl_browser." }] };
+    // ---- Sesion HITL -------------------------------------------------------
+    server.tool("iniciar_hitl_browser", "Abre el navegador interactivo (HITL) en la consulta publica del PJN. ANTES de llamar esta tool, avisale al usuario: 'Se va a abrir una ventana de Chromium; si muestra un verificador (captcha), resolvelo y avisame'. El usuario resuelve el captcha cuando el portal lo pida. La sesion queda viva y las demas tools operan dentro de ella.", {}, async () => {
+        if (pageViva()) {
+            return txt("El navegador ya esta abierto. La sesion HITL sigue viva; podes buscar directamente.");
         }
         try {
             const { default: puppeteer } = await import("puppeteer");
-            globalBrowser = await puppeteer.launch({
-                headless: false,
-                defaultViewport: null,
-            });
-            globalPage = await globalBrowser.newPage();
-            await globalPage.goto('https://scw.pjn.gov.ar/scw/home.seam', { waitUntil: 'networkidle2' });
-            return { content: [{ type: "text", text: "Navegador abierto en https://scw.pjn.gov.ar/scw/home.seam. Por favor, informa al usuario que resuelva el Captcha y te avise, luego ejecuta finalizar_hitl_browser." }] };
+            globalBrowser = await puppeteer.launch({ headless: false, defaultViewport: null, args: ["--start-maximized"] });
+            globalPage = (await globalBrowser.pages())[0] || (await globalBrowser.newPage());
+            await irAHome(globalPage);
+            await sleep(4000); // el modal de captcha inicial tarda en llegar (roundtrip a captcha.pjn.gov.ar)
+            if (await captchaVisible(globalPage)) {
+                return txt("Navegador abierto en " + HOME_URL + ". ATENCION: el portal ya esta mostrando el captcha. ANTES de buscar, decile al usuario: 'Se abrio una ventana de Chromium con un verificador (captcha): resolvelo y avisame cuando este (con un ok alcanza)'. Recien cuando confirme, ejecuta la busqueda. El widget puede quedar visible con 'Desafio aprobado': eso es resuelto.");
+            }
+            return txt("Navegador abierto en " + HOME_URL + ". La sesion queda viva: usa consultar_expediente o buscar_expediente_por_parte. Si el portal muestra captcha, frena, pedile al usuario que lo resuelva y espera su confirmacion.");
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error al iniciar el navegador: ${message}` }], isError: true };
+            globalBrowser = null; globalPage = null;
+            return err(`Error al iniciar el navegador: ${error instanceof Error ? error.message : String(error)}`);
         }
     });
-    // Tool: finalizar_hitl_browser
-    server.tool("finalizar_hitl_browser", "Cierra el navegador interactivo (HITL) y devuelve las cookies y userAgent para usarlas en llamadas de API.", {}, async () => {
-        if (!globalBrowser || !globalPage) {
-            return { content: [{ type: "text", text: "No hay un navegador abierto. Ejecuta iniciar_hitl_browser primero." }], isError: true };
-        }
+
+    server.tool("estado_hitl", "Informa el estado de la sesion HITL: navegador abierto, URL actual y si hay un captcha/modal pendiente.", {}, async () => {
+        if (!pageViva()) return txt("Sesion HITL: CERRADA. Ejecuta iniciar_hitl_browser.");
+        const url = globalPage.url();
+        const captcha = await captchaVisible(globalPage);
+        return txt(`Sesion HITL: ABIERTA\nURL actual: ${url}\nModal/captcha visible: ${captcha ? "SI - debe resolverlo el usuario" : "no"}`);
+    });
+
+    server.tool("finalizar_hitl_browser", "Cierra el navegador HITL y termina la sesion. OJO: las busquedas dependen de la sesion viva; cerrar solo al terminar todas las consultas.", {}, async () => {
+        if (!pageViva()) return txt("No habia navegador abierto.");
+        try { await globalBrowser.close(); } catch { /* ignorar */ }
+        globalBrowser = null; globalPage = null;
+        return txt("Sesion HITL cerrada.");
+    });
+
+    // ---- Busquedas (corren dentro del browser) -----------------------------
+    server.tool("consultar_expediente", "Busca un expediente por jurisdiccion + numero + anio en la consulta publica del PJN (scw.pjn.gov.ar). Requiere sesion HITL activa (iniciar_hitl_browser). Si el portal pide captcha, lo resuelve el usuario y luego se llama obtener_resultados.", {
+        jurisdiccion: z.enum(JURISDICCIONES).describe("Codigo de camara/jurisdiccion (ej. CIV, CNT, COM, CSJ, FLP)"),
+        numero: z.string().describe("Numero de expediente, sin el anio (ej. '33004')"),
+        anio: z.string().describe("Anio del expediente (ej. '2026')"),
+    }, async (args) => {
         try {
-            const cookies = await globalPage.cookies();
-            const userAgent = await globalBrowser.userAgent();
-            await globalBrowser.close();
-            globalBrowser = null;
-            globalPage = null;
-            return { content: [{ type: "text", text: JSON.stringify({ status: "success", sessionData: { userAgent, cookies } }) }] };
+            const page = await getPage();
+            const bloqueo = await bloqueoPorCaptcha(page);
+            if (bloqueo) return bloqueo;
+            await irAHome(page);
+            await activarTab(page, "porExpediente", "#formPublica\\:numero");
+            await setJurisdiccion(page, "formPublica:camaraNumAni", args.jurisdiccion);
+            await setCampo(page, "formPublica:numero", args.numero.trim());
+            await setCampo(page, "formPublica:anio", args.anio.trim());
+            await clickPorId(page, "formPublica:buscarPorNumeroButton");
+            return await ejecutarBusqueda(page, `Consulta por expediente ${args.jurisdiccion} ${args.numero}/${args.anio}`, "formPublica:buscarPorNumeroButton");
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error al finalizar la sesión HITL: ${message}` }], isError: true };
+            return err(`Error en consultar_expediente: ${error instanceof Error ? error.message : String(error)}`);
         }
     });
-    // Tool: detector_plazos_judiciales
-    server.tool("detector_plazos_judiciales", "Audita el texto de actuaciones judiciales para detectar e indexar plazos, fechas límite y hitos temporales relevantes (vencimientos, prescripciones, citaciones)", {
+
+    server.tool("pjn_buscar_expediente_por_parte", "Busca expedientes por nombre de parte en la consulta publica del PJN. LIMITACION DEL PORTAL: la consulta publica anonima solo admite tipo de parte DEMANDADO. Requiere sesion HITL activa.", {
+        jurisdiccion: z.enum(JURISDICCIONES).describe("Codigo de camara/jurisdiccion (ej. CIV, CNT, COM)"),
+        nombre: z.string().describe("Apellido y nombre o razon social de la parte demandada (ej. 'gomez pablo')"),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            const bloqueo = await bloqueoPorCaptcha(page);
+            if (bloqueo) return bloqueo;
+            await irAHome(page);
+            await activarTab(page, "porParte", "#formPublica\\:nomIntervParte");
+            await setJurisdiccion(page, "formPublica:camaraPartes", args.jurisdiccion);
+            await setCampo(page, "formPublica:tipo", "DEMANDADO").catch(() => { /* select puede venir fijo en DEMANDADO */ });
+            await setCampo(page, "formPublica:nomIntervParte", args.nombre.trim());
+            await clickPorId(page, "formPublica:buscarPorParteButton");
+            return await ejecutarBusqueda(page, `Consulta por parte "${args.nombre}" (${args.jurisdiccion}, DEMANDADO)`, "formPublica:buscarPorParteButton");
+        }
+        catch (error) {
+            return err(`Error en pjn_buscar_expediente_por_parte: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("continuar_tras_captcha", "Continua la consulta DESPUES de que el usuario resolvio el captcha: espera la navegacion (sin tocar la pagina) y devuelve la lista de resultados o el expediente, segun donde haya caido el portal. Llamar SOLO cuando el usuario confirme que resolvio el captcha.", {
+        espera_segundos: z.number().int().min(5).max(75).optional().default(45).describe("Cuanto esperar la navegacion post-captcha (default 45s)"),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            // Ya estamos en una pagina util? scrapear directo.
+            const directo = await scrapeSegunPagina(page, "Resultados (post-captcha)");
+            if (directo) return directo;
+            const r = await settle(page, { expectUrls: ["consultaParte.seam", "expediente.seam"], timeoutMs: args.espera_segundos * 1000 });
+            if (r.status === "captcha") {
+                return err(`El captcha/modal sigue visible. El usuario debe terminar de resolverlo en la ventana de Chromium; despues volver a llamar continuar_tras_captcha. No relanzar la busqueda.`);
+            }
+            if (r.status === "timeout") {
+                const estado = await estadoCaptcha(page);
+                if (estado === "aprobado" && urlEs(page, "home.seam")) {
+                    return txt(`Captcha APROBADO pero la busqueda no se envio (la pagina sigue en la home). RELANZA ahora la misma busqueda con los mismos parametros: la pagina no se recarga y el reenvio sale con la verificacion ya aprobada.`);
+                }
+                const aviso = await page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 600)).catch(() => "");
+                return err(`Tras el captcha no hubo navegacion a resultados ni a expediente (URL actual: ${r.url}). Puede que el portal haya rechazado la verificacion o que la busqueda no se haya enviado. Texto visible: ${aviso}\n\nSi la pagina volvio a la home, ahi si corresponde relanzar la busqueda.`);
+            }
+            const out = await scrapeSegunPagina(page, "Resultados (post-captcha)");
+            return out || err(`Pagina inesperada: ${r.url}`);
+        }
+        catch (error) {
+            return err(`Error en continuar_tras_captcha: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("obtener_resultados", "Relee la pagina actual de la sesion HITL: lista de resultados (consultaParte.seam) o expediente abierto (expediente.seam). Para el flujo post-captcha usar continuar_tras_captcha.", {}, async () => {
+        try {
+            const page = await getPage();
+            const out = await scrapeSegunPagina(page, "Resultados actuales");
+            if (out) return out;
+            return err(`No estamos en una pagina de resultados ni de expediente (URL actual: ${page.url()}). Ejecuta primero una busqueda.`);
+        }
+        catch (error) {
+            return err(`Error en obtener_resultados: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("abrir_expediente", "Abre el detalle de un expediente desde la pagina de resultados (click en la fila indicada) y devuelve datos + actuaciones.", {
+        fila: z.number().int().min(0).describe("Indice de fila devuelto por la busqueda (columna 'fila')"),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            if (!urlEs(page, "consultaParte.seam")) {
+                return err(`No estamos en la pagina de resultados (URL actual: ${page.url()}). Ejecuta primero una busqueda.`);
+            }
+            const ok = await page.evaluate((n) => {
+                const tablas = [...document.querySelectorAll("table")].filter((t) =>
+                    [...t.querySelectorAll("th")].some((th) => /expediente/i.test(th.textContent || "")));
+                const tr = tablas[0] && tablas[0].querySelectorAll("tbody tr")[n];
+                const a = tr && tr.querySelector("a");
+                if (!a) return false;
+                a.click();
+                return true;
+            }, args.fila);
+            if (!ok) return err(`No encontre el link de la fila ${args.fila}.`);
+            const r = await settle(page, { expectUrls: ["expediente.seam"] });
+            if (r.status === "captcha") return txt(AVISO_CAPTCHA);
+            if (r.status === "timeout") return err(`No se llego al detalle del expediente (URL actual: ${r.url}).`);
+            const det = await scrapeExpediente(page);
+            return txt(formatearExpediente(det));
+        }
+        catch (error) {
+            return err(`Error en abrir_expediente: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("obtener_actuaciones", "Devuelve las actuaciones del expediente actualmente abierto en la sesion HITL (expediente.seam). Si se pasa 'fila', primero abre ese expediente desde los resultados.", {
+        fila: z.number().int().min(0).optional().describe("Opcional: fila de resultados a abrir antes de scrapear"),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            if (typeof args.fila === "number" && urlEs(page, "consultaParte.seam")) {
+                const ok = await page.evaluate((n) => {
+                    const tablas = [...document.querySelectorAll("table")].filter((t) =>
+                        [...t.querySelectorAll("th")].some((th) => /expediente/i.test(th.textContent || "")));
+                    const tr = tablas[0] && tablas[0].querySelectorAll("tbody tr")[n];
+                    const a = tr && tr.querySelector("a");
+                    if (!a) return false;
+                    a.click();
+                    return true;
+                }, args.fila);
+                if (!ok) return err(`No encontre el link de la fila ${args.fila}.`);
+                const r = await settle(page, { expectUrls: ["expediente.seam"] });
+                if (r.status === "captcha") return txt(AVISO_CAPTCHA);
+                if (r.status === "timeout") return err(`No se llego al detalle (URL actual: ${r.url}).`);
+            }
+            if (!urlEs(page, "expediente.seam")) {
+                return err(`No hay un expediente abierto (URL actual: ${page.url()}). Ejecuta una busqueda y abrir_expediente, o pasa 'fila'.`);
+            }
+            const det = await scrapeExpediente(page);
+            return txt(formatearExpediente(det));
+        }
+        catch (error) {
+            return err(`Error en obtener_actuaciones: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("pjn_obtener_resoluciones_expediente", "Devuelve solo las actuaciones del expediente abierto que parecen resoluciones/autos/sentencias (filtro heuristico sobre TIPO y DESCRIPCION).", {
+        fila: z.number().int().min(0).optional().describe("Opcional: fila de resultados a abrir antes de filtrar"),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            if (typeof args.fila === "number" && urlEs(page, "consultaParte.seam")) {
+                const ok = await page.evaluate((n) => {
+                    const tablas = [...document.querySelectorAll("table")].filter((t) =>
+                        [...t.querySelectorAll("th")].some((th) => /expediente/i.test(th.textContent || "")));
+                    const tr = tablas[0] && tablas[0].querySelectorAll("tbody tr")[n];
+                    const a = tr && tr.querySelector("a");
+                    if (!a) return false;
+                    a.click();
+                    return true;
+                }, args.fila);
+                if (!ok) return err(`No encontre el link de la fila ${args.fila}.`);
+                const r = await settle(page, { expectUrls: ["expediente.seam"] });
+                if (r.status !== "ok") return err(`No se llego al detalle (estado: ${r.status}).`);
+            }
+            if (!urlEs(page, "expediente.seam")) {
+                return err(`No hay un expediente abierto (URL actual: ${page.url()}).`);
+            }
+            const det = await scrapeExpediente(page);
+            return txt(formatearExpediente(det, { soloResoluciones: true }));
+        }
+        catch (error) {
+            return err(`Error en pjn_obtener_resoluciones_expediente: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("volver_a_resultados", "Vuelve de la pagina de expediente a la lista de resultados (history back). Si la conversacion Seam expiro, rehace la busqueda.", {}, async () => {
+        try {
+            const page = await getPage();
+            await page.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => { });
+            if (urlEs(page, "consultaParte.seam")) {
+                const res = await scrapeResultados(page);
+                return txt(formatearResultados(res, "Resultados (back)"));
+            }
+            return err(`El back no volvio a resultados (URL actual: ${page.url()}). La conversacion Seam pudo expirar: rehace la busqueda.`);
+        }
+        catch (error) {
+            return err(`Error en volver_a_resultados: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    // ---- Utilitarias -------------------------------------------------------
+    server.tool("exportar_expediente", "Exporta el expediente actualmente abierto a Markdown con frontmatter YAML (Obsidian/Notion).", {}, async () => {
+        try {
+            const page = await getPage();
+            if (!urlEs(page, "expediente.seam")) return err(`No hay un expediente abierto (URL actual: ${page.url()}).`);
+            const det = await scrapeExpediente(page);
+            const fecha = new Date().toISOString();
+            let out = `---\ntitle: "Expediente PJN"\nsource: "Poder Judicial de la Nacion - Consulta publica"\nsource_url: "${det.url}"\nexport_date: "${fecha}"\ntags:\n  - PJN\n  - expediente-judicial\n---\n\n`;
+            out += formatearExpediente(det);
+            out += `\n\n---\n*Exportado desde la consulta publica del PJN el ${fecha}. Verificar siempre en la fuente oficial.*`;
+            return txt(out);
+        }
+        catch (error) {
+            return err(`Error en exportar_expediente: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("generar_certificacion_forense", "Genera certificacion de trazabilidad de la pagina actualmente abierta en la sesion HITL: URL, timestamp UTC y hash SHA-256 del HTML descargado.", {}, async () => {
+        try {
+            const page = await getPage();
+            const html = await page.content();
+            const url = page.url();
+            const timestamp = new Date().toISOString();
+            const hash = crypto.createHash("sha256").update(html, "utf8").digest("hex");
+            let out = `::: ACTA DE TRAZABILIDAD - Poder Judicial de la Nacion (consulta publica)\n\n`;
+            out += `| Metadato | Valor |\n| :--- | :--- |\n`;
+            out += `| URL de origen | ${url} |\n| Timestamp UTC | ${timestamp} |\n| Tamano HTML | ${Buffer.byteLength(html, "utf8")} bytes |\n| SHA-256 del HTML | ${hash} |\n\n`;
+            out += `> Certifica que el HTML fue obtenido desde la fuente oficial en el momento indicado, dentro de una sesion validada por un humano (HITL). No constituye certificacion oficial del PJN.\n`;
+            return txt(out);
+        }
+        catch (error) {
+            return err(`Error en generar_certificacion_forense: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    server.tool("detector_plazos_judiciales", "Audita texto de actuaciones judiciales para detectar plazos, fechas limite e hitos temporales.", {
         texto_actuaciones: z.string().describe("Texto de las actuaciones judiciales a analizar"),
     }, async (args) => {
         try {
             const text = args.texto_actuaciones;
-            // Define deadline detection patterns for judicial context
+            // Set curado (mismos criterios que PTN/BOPBA, fix ronda 5): sin flag /g
+            // en .test(), tildes cubiertas, plazos en letras y formatos forenses.
             const patterns = [
-                { regex: /\b\d+\s+(días?\s+(habiles|corridos)?|meses|años?)\b/i, name: "Plazo numérico" },
-                { regex: /\b(plazo|término)\s+de\s+(días?|meses|años?)\b/i, name: "Cláusula de plazo" },
-                { regex: /\b(prescribe|prescripción)\b/i, name: "Prescripción" },
+                { regex: /\b(\d+|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|quince|veinte|treinta)\s*(\(\d+\)\s*)?(d[ií]as?|meses|años?|horas?)(\s+(h[aá]biles|corridos|judiciales))?\b/i, name: "Plazo" },
+                { regex: /\bdentro\s+de(l\s+plazo)?(\s+de)?(\s+los)?\s+\w+/i, name: "Plazo 'dentro de'" },
+                { regex: /\bcontados?\s+(a\s+partir|desde)\b/i, name: "Computo del plazo" },
+                { regex: /\bbajo\s+apercibimiento\b/i, name: "Apercibimiento" },
+                { regex: /\b(perentori[oa]|improrrogable|fatal)\b/i, name: "Plazo perentorio" },
+                { regex: /\b(pr[oó]rroga|prorrogar|suspensi[oó]n\s+de(l)?\s+plazo|interrupci[oó]n\s+de(l)?\s+plazo)\b/i, name: "Prorroga/suspension" },
+                { regex: /\b(prescribe|prescripci[oó]n)\b/i, name: "Prescripcion" },
                 { regex: /\b(caduca|caducidad)\b/i, name: "Caducidad" },
-                { regex: /\b(vencimiento|mora)\b/i, name: "Vencimiento/Mora" },
-                { regex: /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/g, name: "Fecha específica" },
-                { regex: /\b(hasta\s+el\s+(?:\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|el\s+día\s+\d+))/i, name: "Fecha límite" },
-                { regex: /\b(dentro\s+de\s+(?:los\s+)?\d+\s+(días?|meses|años?))\b/i, name: "Plazo desde notificación" },
-                { regex: /\b(citar|citación|audiencia)\b/i, name: "Citación/Audiencia" },
-                { regex: /\b(prueba|ofrecimiento\s+de\s+prueba)\b/i, name: "Plazo probatorio" },
+                { regex: /\b(vencimiento|vence|mora)\b/i, name: "Vencimiento/Mora" },
+                { regex: /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/, name: "Fecha especifica" },
+                { regex: /\b\d{1,2}°?\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)(\s+de\s+\d{4})?\b/i, name: "Fecha en letras" },
+                { regex: /\b(hasta\s+el|a\s+m[aá]s\s+tardar)\b/i, name: "Fecha limite" },
+                { regex: /\b(cita(r|ci[oó]n)|audiencia|comparendo|emplazamiento)\b/i, name: "Citacion/Audiencia" },
+                { regex: /\b(notificaci[oó]n|notif[ií]quese|c[eé]dula)\b/i, name: "Notificacion" },
             ];
-            // Split text into paragraphs for analysis
-            const paragraphs = text.split(/\n\n+/);
+            const paragraphs = text.split(/\n\n+|\.\s+(?=[A-ZÁÉÍÓÚ])/);
             const results = [];
             for (const paragraph of paragraphs) {
                 const trimmed = paragraph.trim();
-                if (!trimmed || trimmed.length < 10)
-                    continue;
-                const foundMatches = [];
-                for (const pattern of patterns) {
-                    if (pattern.regex.test(trimmed)) {
-                        foundMatches.push(pattern.name);
-                    }
-                }
-                if (foundMatches.length > 0) {
-                    results.push({
-                        paragraph: trimmed.substring(0, 500) + (trimmed.length > 500 ? '...' : ''),
-                        matches: foundMatches
-                    });
-                }
+                if (!trimmed || trimmed.length < 10) continue;
+                const found = [...new Set(patterns.filter((p) => p.regex.test(trimmed)).map((p) => p.name))];
+                if (found.length) results.push({ paragraph: trimmed.slice(0, 500) + (trimmed.length > 500 ? "..." : ""), matches: found });
             }
-            let content = `# Auditoría de Plazos y Hitos Temporales Judiciales\n\n`;
-            content += `## Resumen\n`;
-            content += `Se identificaron **${results.length}** cláusulas con indicadores temporales relevantes.\n\n`;
-            if (results.length === 0) {
-                content += `No se detectaron plazos, fechas límite o hitos temporales en el texto analizado.\n`;
-                content += `Esto puede indicar:\n`;
-                content += `- El documento no contiene plazos temporales\n`;
-                content += `- Los plazos están expresados en formato no detectado por los patrones actuales\n`;
-                content += `- El texto es muy breve o no es legible\n\n`;
+            let content = `# Auditoria de Plazos Judiciales\n\nSe identificaron **${results.length}** pasajes con indicadores temporales.\n\n`;
+            if (!results.length) {
+                content += `No se detectaron plazos ni hitos temporales en el texto analizado.\n`;
+            } else {
+                results.forEach((r, i) => { content += `### ${i + 1}. [${r.matches.join(", ")}]\n> ${r.paragraph}\n\n`; });
             }
-            else {
-                content += `## Cláusulas Temporales Detectadas\n\n`;
-                results.forEach((r, idx) => {
-                    content += `### ${idx + 1}. Cláusula Temporal (Indicador: ${r.matches.join(', ')})\n`;
-                    content += `> ${r.paragraph}\n\n`;
-                });
-            }
-            content += `## Patrones de Búsqueda Utilizados\n`;
-            patterns.forEach((p, idx) => {
-                content += `${idx + 1}. **${p.name}**: ${p.regex.source}\n`;
-            });
-            content += `\n> **Nota:** Esta herramienta detecta patrones de texto comunes en documentos judiciales. No constituye asesoramiento legal. Verificar siempre los plazos directamente en el documento original del PJN.`;
-            return {
-                content: [{ type: "text", text: content }],
-            };
+            content += `\n> Herramienta de deteccion de patrones; no reemplaza la lectura del documento original.`;
+            return txt(content);
         }
         catch (error) {
-            return {
-                isError: true,
-                content: [{ type: "text", text: `Error al detectar plazos judiciales: ${error.message}` }],
-            };
+            return err(`Error al detectar plazos judiciales: ${error.message}`);
         }
     });
-    // Tool: generar_certificacion_forense
-    server.tool("generar_certificacion_forense", "Genera una certificación forense de autenticidad para un documento del PJN con hash SHA-256, timestamp y metadatos de integridad", {
-        actuacion_id: z.string().describe("ID de la actuación/documento a certificar"),
-        captchaToken: z.string().describe("Token de reCAPTCHA para acceso al documento"),
-    }, async (args) => {
-        try {
-            const actuacionId = String(args.actuacion_id);
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const timestamp = new Date().toISOString();
-            // Download the document
-            const payload = new URLSearchParams({
-                modo: "descargar_documento",
-                actuacion_id: actuacionId,
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                responseType: 'arraybuffer',
-                timeout: 30000
-            });
-            const docBuffer = Buffer.from(response.data);
-            const sizeBytes = Buffer.byteLength(docBuffer, 'utf8');
-            const hash = crypto.createHash('sha256').update(docBuffer).digest('hex');
-            let content = `::: ACTA DE CERTIFICACIÓN FORENSE DE AUTENTICIDAD Y TRAZABILIDAD\n`;
-            content += `::: Poder Judicial de la Nación (PJN) - Consulta\n\n`;
-            content += `## DOCUMENTO CERTIFICADO\n`;
-            content += `- **ID de Actuación:** \`${actuacionId}\`\n`;
-            content += `- **Fuente:** Poder Judicial de la Nación (PJN)\n\n`;
-            content += `## METADATOS FORENSES\n`;
-            content += `| Metadato Forense | Detalle Registrado |\n`;
-            content += `| :--- | :--- |\n`;
-            content += `| **Timestamp UTC** | \`${timestamp}\` |\n`;
-            content += `| **URL de Origen** | ${targetUrl} |\n`;
-            content += `| **Peso del Documento** | \`${sizeBytes} bytes\` |\n`;
-            content += `| **Hash SHA-256 de Control** | \`${hash}\` |\n\n`;
-            content += `## GARANTÍA DE INTEGRIDAD\n`;
-            content += `> **[!] GARANTÍA DE NO ALTERACIÓN:** Este certificado garantiza que el documento fue descargado íntegramente desde la fuente oficial del PJN en el timestamp indicado. El hash SHA-256 permite verificar cualquier modificación posterior del archivo.\n\n`;
-            content += `## MÉTODO DE VERIFICACIÓN\n`;
-            content += `Para verificar la integridad de este documento en el futuro:\n`;
-            content += `1. Descargue nuevamente el documento desde el PJN usando el ID ${actuacionId}\n`;
-            content += `2. Calcule el hash SHA-256 del archivo descargado\n`;
-            content += `3. Compare con el hash certificado: \`${hash}\`\n`;
-            content += `4. Si los hashes coinciden, el documento no ha sido alterado\n\n`;
-            content += `---\n`;
-            content += `*Este documento constituye un instrumento técnico de trazabilidad y autenticidad. No constituye certificación legal oficial del Poder Judicial de la Nación. Para fines legales, consulte las autoridades competentes.*\n`;
-            content += `*Certificado generado automáticamente por Argentina-PjnConsulta-MCP v1.0.0*`;
-            return {
-                content: [{ type: "text", text: content }],
-            };
-        }
-        catch (error) {
-            return {
-                isError: true,
-                content: [{ type: "text", text: `Error al generar certificación forense: ${error.message}` }],
-            };
-        }
+
+    server.tool("alcance_fuente", "Informa capacidades, flujo HITL, fuentes y limitaciones del conector pjn-consulta-mcp.", {}, async () => {
+        const text = `# Alcance y Fuentes - PJN Consulta (scw.pjn.gov.ar)
+
+## Arquitectura (reescritura 10/06/2026)
+Todas las consultas corren DENTRO de un navegador interactivo (HITL). El captcha del PJN (servicio propio, captcha.pjn.gov.ar) lo resuelve SIEMPRE el usuario; el conector nunca lo automatiza.
+
+## Flujo de uso
+1. \`iniciar_hitl_browser\` - abre la sesion (una vez).
+2. \`consultar_expediente\` (jurisdiccion+numero+anio) o \`pjn_buscar_expediente_por_parte\` (solo DEMANDADO, limite del portal publico).
+3. Si aparece captcha: el usuario lo resuelve en la ventana y avisa "listo" -> \`continuar_tras_captcha\` (NUNCA relanzar la busqueda con captcha pendiente: lo anula).
+4. \`abrir_expediente\` / \`obtener_actuaciones\` / \`pjn_obtener_resoluciones_expediente\`.
+5. \`volver_a_resultados\` para iterar; \`exportar_expediente\` / \`generar_certificacion_forense\` para documentar.
+6. \`finalizar_hitl_browser\` al terminar todo.
+
+## Jurisdicciones
+${JURISDICCIONES.join(", ")}
+
+## Limitaciones conocidas
+- Consulta publica anonima: por parte solo admite tipo DEMANDADO (regla del portal).
+- Sin descarga de PDFs de actuaciones en la consulta publica anonima.
+- Reparacion Historica y Gestion Documental: no implementadas en esta version.
+- La conversacion Seam expira: si \`volver_a_resultados\` falla, rehacer la busqueda.
+
+## Aviso
+Conector de investigacion sobre el portal publico oficial. No constituye asesoramiento juridico ni certificacion oficial.`;
+        return txt(text);
     });
-    // Tool: buscar_por_semantica
-    server.tool("buscar_por_semantica", "Busca expedientes en el PJN utilizando expansión semántica de términos. El LLM debe generar sinónimos y términos equivalentes antes de llamar esta herramienta.", {
-        concepto: z.string().describe("Concepto central a buscar (ej. 'despido', 'alimentos', 'divorcio')"),
-        terminos_equivalentes: z.array(z.string()).describe("Lista de sinónimos o términos relacionados generados por el LLM (ej. ['terminación', 'extinción', 'rescisión'])"),
-        jurisdiction_id: z.enum(["CSJN", "CFCP", "CNACCF", "CNACCFED", "CNACAF", "CFSS", "CNAC", "CNAT", "CNCOM", "CNE", "CNPE", "CNACC"]).optional().describe("ID de la jurisdicción (opcional)"),
-        captchaToken: z.string().describe("Token de reCAPTCHA para acceso al portal"),
-    }, async (args) => {
-        try {
-            const concepto = args.concepto;
-            const terminos = args.terminos_equivalentes || [];
-            // Combine concept with equivalent terms for broader search
-            const allTerms = [concepto, ...terminos].join(' ');
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                criterio: allTerms,
-                pagina: "1",
-                "g-recaptcha-response": args.captchaToken
-            });
-            if (args.jurisdiction_id) {
-                payload.append("jurisdiction_id", args.jurisdiction_id);
-            }
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let content = `# Búsqueda Semántica - "${concepto}"\n\n`;
-            content += `## Términos de Búsqueda Utilizados\n`;
-            content += `- **Concepto principal:** ${concepto}\n`;
-            content += `- **Términos equivalentes:** ${terminos.join(', ') || 'Ninguno'}\n`;
-            content += `- **Query completa:** "${allTerms}"\n`;
-            if (args.jurisdiction_id) {
-                content += `- **Jurisdicción:** ${args.jurisdiction_id}\n`;
-            }
-            content += `\n`;
-            content += `## Resultados Encontrados\n`;
-            content += `**Título de la página:** ${title}\n\n`;
-            content += `### Contenido Extraído:\n${textContent}\n`;
-            content += `\n> **Nota:** Esta herramienta utiliza expansión semántica para capturar expedientes que pueden no usar la terminología exacta del concepto buscado.`;
-            return {
-                content: [{ type: "text", text: content }],
-            };
-        }
-        catch (error) {
-            return {
-                isError: true,
-                content: [{ type: "text", text: `Error en búsqueda semántica: ${error.message}` }],
-            };
-        }
-    });
-    // Tool: relacionar_expedientes
-    server.tool("relacionar_expedientes", "Busca expedientes relacionados con un expediente específico (mismas partes, temas similares, misma jurisdicción)", {
-        criterio_base: z.string().describe("Criterio base del expediente de referencia"),
-        terminos_relacionados: z.array(z.string()).optional().describe("Términos relacionados para buscar expedientes conexos"),
-        jurisdiction_id: z.enum(["CSJN", "CFCP", "CNACCF", "CNACCFED", "CNACAF", "CFSS", "CNAC", "CNAT", "CNCOM", "CNE", "CNPE", "CNACC"]).optional().describe("ID de la jurisdicción (opcional)"),
-        captchaToken: z.string().describe("Token de reCAPTCHA para acceso al portal"),
-    }, async (args) => {
-        try {
-            const criterioBase = args.criterio_base;
-            const terminosRelacionados = args.terminos_relacionados || [];
-            // Combine base criteria with related terms
-            const searchQuery = [criterioBase, ...terminosRelacionados].join(' ');
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                criterio: searchQuery,
-                pagina: "1",
-                "g-recaptcha-response": args.captchaToken
-            });
-            if (args.jurisdiction_id) {
-                payload.append("jurisdiction_id", args.jurisdiction_id);
-            }
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let content = `# Expedientes Relacionados - "${criterioBase}"\n\n`;
-            content += `## Expediente de Referencia\n`;
-            content += `- **Criterio base:** ${criterioBase}\n`;
-            if (args.jurisdiction_id) {
-                content += `- **Jurisdicción:** ${args.jurisdiction_id}\n`;
-            }
-            content += `\n`;
-            content += `## Criterio de Búsqueda\n`;
-            content += `**Query:** "${searchQuery}"\n`;
-            content += `**Términos relacionados:** ${terminosRelacionados.join(', ') || 'Ninguno'}\n\n`;
-            content += `## Resultados Encontrados\n`;
-            content += `**Título de la página:** ${title}\n\n`;
-            content += `### Contenido Extraído:\n${textContent}\n`;
-            content += `\n> **Nota:** Esta herramienta busca por similitud temática y contextual. Las relaciones no son oficiales del PJN.`;
-            return {
-                content: [{ type: "text", text: content }],
-            };
-        }
-        catch (error) {
-            return {
-                isError: true,
-                content: [{ type: "text", text: `Error al relacionar expedientes: ${error.message}` }],
-            };
-        }
-    });
-    // Tool: exportar_expediente
-    server.tool("exportar_expediente", "Exporta la información de un expediente a formato Markdown estructurado con frontmatter YAML para sistemas de gestión del conocimiento (Notion, Obsidian, etc.)", {
-        criterio: z.string().describe("Criterio o número de expediente a exportar"),
-        captchaToken: z.string().describe("Token de reCAPTCHA para acceso al portal"),
-        incluir_actuaciones: z.boolean().optional().describe("Incluir actuaciones del expediente (por defecto: true)"),
-    }, async (args) => {
-        try {
-            const criterio = args.criterio;
-            const incluirActuaciones = args.incluir_actuaciones !== false;
-            const exportDate = new Date().toISOString();
-            // Get expedition data
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                criterio: criterio,
-                pagina: "1",
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Expediente";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 2000);
-            // Build YAML frontmatter
-            let content = `---\n`;
-            content += `title: "Expediente ${criterio}"\n`;
-            content += `criterio: "${criterio}"\n`;
-            content += `source: "Poder Judicial de la Nación (PJN) - Consulta"\n`;
-            content += `source_url: "${targetUrl}"\n`;
-            content += `export_date: "${exportDate}"\n`;
-            content += `exported_by: "Argentina-PjnConsulta-MCP v1.0.0"\n`;
-            content += `tags:\n`;
-            content += `  - PJN\n`;
-            content += `  - expediente-judicial\n`;
-            content += `  - poder-judicial-nacion\n`;
-            content += `  - expediente-${criterio.replace(/\//g, '-')}\n`;
-            content += `---\n\n`;
-            // Add document content
-            content += `# Expediente ${criterio}\n\n`;
-            content += `> **Fuente:** [PJN Consulta](${targetUrl})\n`;
-            content += `> **Criterio:** ${criterio}\n\n`;
-            if (incluirActuaciones) {
-                content += `## Actuaciones\n\n`;
-                content += `> **Nota:** El contenido completo de las actuaciones se obtiene mediante consulta al portal. Para visualizar el contenido íntegro, utilice la herramienta \`obtener_actuaciones\`.\n\n`;
-                content += `### Resumen Extraído:\n${textContent}\n\n`;
-            }
-            content += `---\n\n`;
-            content += `*Documento exportado automáticamente desde el Poder Judicial de la Nación. Verificar siempre la información en la fuente oficial.*`;
-            return {
-                content: [{ type: "text", text: content }],
-            };
-        }
-        catch (error) {
-            return {
-                isError: true,
-                content: [{ type: "text", text: `Error al exportar expediente: ${error.message}` }],
-            };
-        }
-    });
-    // Tool: pjn_buscar_reparacion_historica
-    server.tool("pjn_buscar_reparacion_historica", "Busca reclamos de Reparación Histórica de ANSES (jubilados y pensionados).", {
-        nombre: z.string().describe("Nombre del jubilado/pensionado."),
-        apellido: z.string().describe("Apellido del jubilado/pensionado."),
-        captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://scw.pjn.gov.ar/scw/home.seam";
-            const payload = new URLSearchParams({
-                modo: "reparacion_historica",
-                nombre: args.nombre,
-                apellido: args.apellido,
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let resultText = `# PJN - Reparación Histórica (ANSES)\n\n`;
-            resultText += `**Nombre:** ${args.nombre}\n`;
-            resultText += `**Apellido:** ${args.apellido}\n`;
-            resultText += `**Título:** ${title}\n\n`;
-            resultText += `### Contenido Extraído:\n${textContent}\n`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en pjn_buscar_reparacion_historica: ${message}` }], isError: true };
-        }
-    });
-    // Tool: pjn_buscar_gestion_documental
-    server.tool("pjn_buscar_gestion_documental", "Busca documentos en la Plataforma de Gestión Documental del PJN (resoluciones, contratos, actos administrativos).", {
-        keyword: z.string().optional().describe("Palabra clave para búsqueda."),
-        dependencia: z.enum(["CONSEJO_MAGISTRATURA", "JURADO_ENJUICIAMIENTO", "FUEROS_COMPETENCIA_PAIS", "FUEROS_NACIONALES", "FUEROS_FEDERALES"]).optional().describe("Dependencia emisora del documento."),
-        fecha_desde: z.string().optional().describe("Fecha desde (DD/MM/YYYY)."),
-        fecha_hasta: z.string().optional().describe("Fecha hasta (DD/MM/YYYY)."),
-        numero_resolucion: z.string().optional().describe("Número de resolución."),
-        anio_resolucion: z.string().optional().describe("Año de resolución."),
-        orden_por: z.enum(["mas_recientes", "menos_recientes", "mayor_menor", "menor_mayor"]).optional().default("mas_recientes").describe("Orden de resultados."),
-        captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://www.pjn.gov.ar/gestion-documental";
-            const payload = new URLSearchParams({
-                keyword: args.keyword || "",
-                dependencia: args.dependencia || "",
-                fecha_desde: args.fecha_desde || "",
-                fecha_hasta: args.fecha_hasta || "",
-                numero_resolucion: args.numero_resolucion || "",
-                anio_resolucion: args.anio_resolucion || "",
-                orden_por: args.orden_por,
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" }
-            });
-            const $ = cheerio.load(response.data);
-            const title = $("title").text() || "Resultados";
-            let textContent = $("body").text().replace(/\s+/g, ' ').substring(0, 5000);
-            let resultText = `# PJN - Gestión Documental\n\n`;
-            if (args.keyword)
-                resultText += `**Keyword:** ${args.keyword}\n`;
-            if (args.dependencia)
-                resultText += `**Dependencia:** ${args.dependencia}\n`;
-            if (args.fecha_desde)
-                resultText += `**Fecha desde:** ${args.fecha_desde}\n`;
-            if (args.fecha_hasta)
-                resultText += `**Fecha hasta:** ${args.fecha_hasta}\n`;
-            if (args.numero_resolucion)
-                resultText += `**Resolución N°:** ${args.numero_resolucion}\n`;
-            if (args.anio_resolucion)
-                resultText += `**Año:** ${args.anio_resolucion}\n`;
-            resultText += `**Orden:** ${args.orden_por}\n\n`;
-            resultText += `### Contenido Extraído:\n${textContent}\n`;
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en pjn_buscar_gestion_documental: ${message}` }], isError: true };
-        }
-    });
-    // Tool: pjn_descargar_documento_gestion
-    server.tool("pjn_descargar_documento_gestion", "Descarga un documento específico de la Plataforma de Gestión Documental.", {
-        documento_id: z.string().describe("ID del documento a descargar."),
-        captchaToken: z.string().describe("Token de reCAPTCHA obtenido vía HITL.")
-    }, async (args) => {
-        try {
-            const targetUrl = "https://www.pjn.gov.ar/gestion-documental/descargar";
-            const payload = new URLSearchParams({
-                documento_id: args.documento_id,
-                "g-recaptcha-response": args.captchaToken
-            });
-            const response = await axiosClient.post(targetUrl, payload.toString(), {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                responseType: 'arraybuffer'
-            });
-            const contentType = String(response.headers['content-type'] || '');
-            const isPdf = contentType.includes('pdf');
-            let resultText = `# PJN - Descarga de Documento\n\n`;
-            resultText += `**Documento ID:** ${args.documento_id}\n`;
-            resultText += `**Tipo:** ${contentType || 'unknown'}\n`;
-            resultText += `**Tamaño:** ${response.data.length} bytes\n\n`;
-            if (isPdf) {
-                resultText += `> **Nota:** El documento es un PDF. Para visualizar el contenido, descargue el archivo usando el ID proporcionado.\n`;
-            }
-            else {
-                resultText += `> **Nota:** El documento se ha descargado correctamente.\n`;
-            }
-            return { content: [{ type: "text", text: resultText }] };
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `Error en pjn_descargar_documento_gestion: ${message}` }], isError: true };
-        }
-    });
+
+    // ---- Stubs honestos (capacidades que el portal publico NO ofrece) ------
+    const stub = (nombre, motivo) => server.tool(nombre, `NO DISPONIBLE: ${motivo}`, {}, async () =>
+        err(`${nombre} no esta disponible: ${motivo}`));
+    stub("buscar_por_semantica", "el portal publico del PJN solo busca por numero de expediente o por parte demandada; no existe busqueda tematica/semantica. Usar JUBA o PJN Jurisprudencia para busqueda por temas.");
+    stub("relacionar_expedientes", "el portal publico no ofrece expedientes relacionados. Alternativa: pjn_buscar_expediente_por_parte con el nombre de la parte para listar todas sus causas como demandada.");
+    stub("pjn_buscar_reparacion_historica", "la solapa existe en el portal pero no fue mapeada aun en esta version del conector.");
+    stub("pjn_buscar_gestion_documental", "corresponde a otro sitio (www.pjn.gov.ar/gestion-documental) no cubierto por esta version.");
+    stub("pjn_descargar_documento_actuacion", "no implementada aun en esta version. El portal SI muestra enlaces 'Descargar'/'Ver' por actuacion (verificado 10/6/26); el mapeo de esa descarga queda pendiente para una proxima iteracion.");
+    stub("pjn_descargar_documento_gestion", "corresponde a Gestion Documental, no cubierto por esta version.");
 }
+
 export function registerAllPrompts(server) {
-    server.prompt("auditar_expediente", "Realiza una auditoría automatizada del estado procesal del expediente.", {
-        criterio: z.string().describe("Número de expediente a consultar"),
-        captchaToken: z.string().describe("Token de Google reCAPTCHA válido")
-    }, (args) => {
-        return {
-            messages: [
-                {
-                    role: "user",
-                    content: {
-                        type: "text",
-                        text: `Por favor, realiza un análisis del expediente '${args.criterio}' usando el captchaToken '${args.captchaToken}':\n1. Llama a \`consultar_expediente\`.\n2. Llama a \`obtener_actuaciones\`.\n3. Elabora un reporte detallado.\n\nNota: Si no cuentas con el captchaToken, ten en cuenta que las herramientas \`iniciar_hitl_browser\` y \`finalizar_hitl_browser\` están disponibles y son la forma preferida para sortear el Captcha interactuando con el usuario, en lugar de pedirle que copie y pegue HTML manualmente.`
-                    }
-                }
-            ]
-        };
-    });
+    server.prompt("auditar_expediente", "Auditoria del estado procesal de un expediente via sesion HITL.", {
+        jurisdiccion: z.string().describe("Codigo de jurisdiccion (ej. CIV)"),
+        numero: z.string().describe("Numero de expediente"),
+        anio: z.string().describe("Anio"),
+    }, (args) => ({
+        messages: [{
+            role: "user",
+            content: {
+                type: "text",
+                text: `Audita el expediente ${args.jurisdiccion} ${args.numero}/${args.anio}:\n1. iniciar_hitl_browser (si no hay sesion).\n2. consultar_expediente con esos datos. Si aparece captcha, pedi al usuario que lo resuelva y segui con obtener_resultados.\n3. abrir_expediente sobre la fila correcta.\n4. detector_plazos_judiciales sobre el texto de las actuaciones.\n5. Elabora un reporte del estado procesal con plazos detectados.`
+            }
+        }]
+    }));
 }
-// Initialize the local server instance
+
 export const server = new McpServer({
     name: "pjn-consulta-mcp",
-    version: "1.0.0"
+    version: "2.0.0"
 });
-// Register tools
 registerAllTools(server);
 registerAllPrompts(server);
-// Connect with stdio (only when run directly and not in Vercel/Next environment)
+
 if (typeof process !== "undefined" && !process.env.VERCEL && !process.env.NEXT_RUNTIME) {
     const cleanupBrowser = async () => {
         if (globalBrowser) {
@@ -657,14 +673,14 @@ if (typeof process !== "undefined" && !process.env.VERCEL && !process.env.NEXT_R
             globalPage = null;
         }
     };
-    process.on("SIGINT",  async () => { await cleanupBrowser(); process.exit(0); });
+    process.on("SIGINT", async () => { await cleanupBrowser(); process.exit(0); });
     process.on("SIGTERM", async () => { await cleanupBrowser(); process.exit(0); });
-    process.on("exit",    ()       => { if (globalBrowser) { try { globalBrowser.process()?.kill(); } catch { /* ignorar */ } } });
+    process.on("exit", () => { if (globalBrowser) { try { globalBrowser.process()?.kill(); } catch { /* ignorar */ } } });
     const transport = new StdioServerTransport();
-    server.connect(transport).catch((err) => {
-        console.error("Server connection failed", err);
+    server.connect(transport).catch((err2) => {
+        console.error("Server connection failed", err2);
         process.exit(1);
     });
-    console.error("Poder Judicial de la Nación (PJN) - Consulta MCP Server is running via Stdio.");
+    console.error("PJN Consulta MCP (HITL v2) corriendo via Stdio.");
 }
 //# sourceMappingURL=pjn.js.map
