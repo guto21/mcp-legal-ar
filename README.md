@@ -1,6 +1,6 @@
 # mcp-legal-ar
 
-9 conectores jurídicos argentinos operativos integrados en uno solo (+2 en desarrollo). 100% local. Sin servidores externos de terceros. Código abierto y auditable.
+11 conectores jurídicos argentinos operativos integrados en uno solo. 100% local. Sin servidores externos de terceros. Código abierto y auditable.
 
 ---
 
@@ -8,13 +8,13 @@
 
 Claude Desktop puede conectarse a bases de datos externas a través de conectores llamados MCP. Este repositorio instala un único conector que le da acceso simultáneo a las principales fuentes jurídicas argentinas:
 
-- Jurisprudencia: JUBA, SCBA
+- Jurisprudencia: JUBA, SCBA, SAIJ (federal/nacional/provincial), PJN Jurisprudencia (sumarios de cámaras federales)
 - Boletines oficiales: BORA, BOPBA
-- Legislación: InfoLEG, Normativa PBA
+- Legislación: InfoLEG, Normativa PBA, SAIJ
 - Doctrina administrativa y fiscal: PTN, TFN
 - Expedientes federales: PJN Consulta (vía sesión HITL)
 
-Sin este hub, cada fuente requeriría instalar y configurar un conector por separado. Con este hub, se instala uno solo y las 9 fuentes operativas quedan disponibles al mismo tiempo. PJN Jurisprudencia y SAIJ están incluidos pero todavía en desarrollo (ver "Fuentes disponibles").
+Sin este hub, cada fuente requeriría instalar y configurar un conector por separado. Con este hub, se instala uno solo y las 11 fuentes quedan disponibles al mismo tiempo.
 
 Este repositorio no crea ninguna fuente nueva. Unifica conectores desarrollados por la comunidad argentina de legal tech; el mérito de cada uno corresponde a sus autores originales.
 
@@ -35,8 +35,9 @@ Claude Desktop
            ├── ptn__*          → proceso hijo Node
            ├── tfn__*          → proceso hijo Node
            ├── scba__*         → proceso hijo Node
+           ├── saij__*         → proceso hijo Node
            ├── pjn__*          → proceso hijo Node (búsqueda dentro del navegador HITL)
-           └── pjnjuris__*     → proceso hijo Node (en desarrollo — ver Fuentes)
+           └── pjnjuris__*     → proceso hijo Node (API REST + captcha HITL)
 ```
 
 ---
@@ -178,13 +179,8 @@ Algunos conectores dependen de que las webs oficiales estén disponibles. Si una
 | 7 | **TFN** | Tribunal Fiscal de la Nación | 15 | [voftec/tfn-mcp](https://github.com/voftec/tfn-mcp) |
 | 8 | **SCBA** | Sentencias y resoluciones de la Suprema Corte de Buenos Aires | 4 | [FacundoEmanuel/scba-mcp-server](https://github.com/FacundoEmanuel/scba-mcp-server) |
 | 9 | **PJN Consulta** | Estado procesal de expedientes federales (reescrito 10/6/26: las consultas corren dentro del navegador HITL; captcha resuelto por el usuario; por parte solo DEMANDADO, límite del portal público) | 14 | reescritura propia (estructura original: [voftec](https://github.com/voftec)) |
-
-### 🔧 En desarrollo
-
-| # | Nombre | Descripción | Estado |
-|---|--------|-------------|--------|
-| 10 | **PJN Jurisprudencia** | Fallos y sentencias federales | Scaffold sin búsqueda funcional; pendiente de la misma reescritura HITL que PJN Consulta. |
-| 11 | **SAIJ** | Sistema Argentino de Información Jurídica (330.000+ documentos) | Bloqueo anti-bot (HTTP 403); en evaluación un fallback de host alternativo |
+| 10 | **SAIJ** | Sistema Argentino de Información Jurídica (jurisprudencia, legislación, doctrina y dictámenes; 330.000+ documentos) | 15 | [Joaquin Escalante](https://github.com/) (reparado 10/6/26: el término de búsqueda va en `r`, no en `s`) |
+| 11 | **PJN Jurisprudencia** | Sumarios de fallos de cámaras nacionales y federales (Sistema de Jurisprudencia del Consejo de la Magistratura, sj.pjn.gov.ar) | 18 | reescritura propia 10/6/26 (API REST + captcha inyectado vía HITL) |
 
 ---
 

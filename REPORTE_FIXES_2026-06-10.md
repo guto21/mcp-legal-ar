@@ -243,11 +243,61 @@ Mejoras futuras anotadas (no bloqueantes): descarga de PDFs de actuaciones (el p
 - Hallazgo comunitario: marketplace hernan-cc/claude-plugins (saij/csjn/juba/juscaba
   via uvx + skill judicial-recon). JusCABA anotado como posible conector 12.
 
-### Re-test (tras reiniciar Claude Desktop)
-1. `saij__saij_search_legislacion` query "locacion de obra" → resultados reales (no 500).
-2. `saij__saij_search_jurisprudencia` query "daños punitivos" → resultados.
-3. `pjnjuris__iniciar_hitl_browser` → `pjnjuris__buscar_jurisprudencia_fed` texto "daños punitivos", camara CCF → si CAPTCHA PENDIENTE: resolver, "ok", reintentar la misma tool → sumarios con total.
-4. `pjnjuris__obtener_sumario` con un ID de los resultados → texto integro.
+### Re-test SAIJ (en vivo, 2da iteracion) — afinado del rawQuery
+- 1er intento del fix daba 0 en multipalabra: el texto libre se expandia server-side
+  a `contenido:` (campo MUERTO en el indice) y la frase con `?` incluia stopwords
+  ("locacion?de?obra") que no estan indexados y rompen el match.
+- Verificado uno por uno: `+titulo:despido` ✅, `+texto:despido` ✅, `+texto:locacion` ✅,
+  `+texto:locacion?de?obra` ✗ (0). Fix definitivo de `buildRawQuery`: sin campo →
+  `texto:`; multipalabra → AND de `+campo:palabra` por termino, descartando stopwords
+  (de, la, el, en, por...). SAIJ OPERATIVO.
+
+### PJN Jurisprudencia — captcha de un solo uso, rediseño del flujo
+Hallazgo en vivo (re-test del usuario): el captcha NO esta en el formulario; aparece
+DESPUES de apretar "Buscar", y la propia app lo consume en su POST (token de un solo
+uso). Por eso reintentar la busqueda desde el conector siempre daba CAPTCHA PENDIENTE:
+el token ya estaba gastado. Rediseño: en vez de pelear por el token, se intercepta
+`window.fetch` (instalado en iniciar_hitl_browser e irAlBuscador) y se guarda la
+ultima respuesta de `/sumarios/search` y de `/sumarios/{id}` que dispara la propia
+pagina. Nueva tool `leer_resultados` devuelve lo que el portal ya entrego;
+`obtener_sumario` usa primero el detalle interceptado. El usuario hace la busqueda
+normal en la ventana (incluido el captcha) y el conector lee el resultado.
+
+### pjnjuris - `buscar_asistido` (division de trabajo propuesta por el usuario)
+Feedback del usuario: que el conector complete la busqueda y el solo ponga el captcha.
+Nueva tool `buscar_asistido` {texto}: encuentra el campo de busqueda visible en la SPA
+(heuristica por placeholder/aria-label; setter nativo + eventos input/change para que
+Angular lo registre), clickea "Buscar" por texto del boton, y espera hasta 70s mientras
+el usuario resuelve el captcha; el interceptor de fetch captura la respuesta y la tool
+la devuelve en la misma llamada. Requisito: el usuario para una vez en la seccion
+(camara/tipo) antes de llamar. Fallback: `leer_resultados`.
+
+### pjnjuris - SOLUCION DEFINITIVA: captcha inyectado (independiente de la SPA)
+Problema final: la SPA Angular de sj.pjn.gov.ar a veces renderiza VACIA bajo Puppeteer
+(la ruta #/pages/seleccionar-camara queda en blanco), entonces no hay formulario ni
+boton ni widget de captcha que el usuario pueda usar. buscar_asistido fallaba ("no
+encontre boton Buscar") porque no habia UI.
+
+Diagnostico clave: `listar_camaras` SI devolvio las 28 camaras desde la ventana → el
+anti-bot NO bloquea; el contexto del navegador (origen sj.pjn.gov.ar + cookies TSPD)
+esta sano. Lo unico que necesita token es POST /sumarios/search.
+
+Fix `preparar_captcha`: inyecta el widget oficial del PJN (init.js de captcha.pjn.gov.ar,
+sitekey JURISPRUDENCIA) en un div propio (.pjn-captcha) flotante sobre la ventana, sin
+depender de la UI del portal. El usuario resuelve ESE captcha → el widget puebla
+#captcha-response → buscar_jurisprudencia_fed lee el token y dispara la busqueda por la
+API. Mismo sitekey y origen que la app oficial: el server valida el token igual.
+
+VERIFICADO EN VIVO (11/06... en realidad 10/06 noche): preparar_captcha → usuario
+resolvio → buscar_jurisprudencia_fed "locacion de obra" CCF → **5 sumarios reales**
+(Parques Nacionales c/ Antartida Seguros 2024, etc.) con expediente, fecha y texto.
+PJN JURISPRUDENCIA OPERATIVO. SON LOS 11.
+
+### Re-test rapido (tras cualquier reinicio)
+1. `saij__saij_search_legislacion` "locacion de obra" → resultados (AND por termino) ✅ verificado.
+2. `saij__saij_search_jurisprudencia` "daños punitivos" → resultados.
+3. `pjnjuris__iniciar_hitl_browser` → `preparar_captcha` → usuario resuelve → `buscar_jurisprudencia_fed` texto+camara → sumarios ✅ verificado.
+4. `pjnjuris__obtener_sumario` con un ID → texto integro.
 
 ## PENDIENTES / RIESGOS CONOCIDOS
 - **No verificado en vivo:** que la SPA de argentina.gob.ar auto-ejecute la busqueda al cargar la URL con parametros bajo Puppeteer (el sandbox de esta sesion no podia correr node ni navegador). Si el test 8 da 0 resultados, el siguiente paso es capturar el XHR real con DevTools (pestaña Network al buscar) y pegarme la URL del request.

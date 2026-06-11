@@ -79,6 +79,38 @@ async function irAlBuscador(page) {
         await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
         await sleep(2500); // arranque de la SPA + widget captcha
     }
+    await instalarInterceptor(page);
+}
+
+/**
+ * Engancha window.fetch para guardar la ULTIMA respuesta de sumarios/search y de
+ * sumarios/{id} que dispara la PROPIA app (con su token de captcha de un solo uso).
+ * Asi no peleamos por el token: el usuario hace la busqueda normal en la pagina y
+ * nosotros leemos lo que el portal ya devolvio. Idempotente.
+ */
+async function instalarInterceptor(page) {
+    await page.evaluate(() => {
+        if (window.__pjnHook) return;
+        window.__pjnHook = true;
+        window.__pjnCaptura = { search: null, searchTs: 0, detalle: {}, ultimoError: null };
+        const origFetch = window.fetch;
+        window.fetch = async function (...args) {
+            const url = (args[0] && args[0].url) ? args[0].url : String(args[0]);
+            const resp = await origFetch.apply(this, args);
+            try {
+                if (/\/api\/public\/sumarios\/search/.test(url)) {
+                    const clone = resp.clone();
+                    clone.json().then((j) => { window.__pjnCaptura.search = j; window.__pjnCaptura.searchTs = Date.now(); })
+                        .catch(() => { });
+                } else if (/\/api\/public\/sumarios\/\d+(\?|$)/.test(url)) {
+                    const id = (url.match(/sumarios\/(\d+)/) || [])[1];
+                    const clone = resp.clone();
+                    clone.json().then((j) => { if (id) window.__pjnCaptura.detalle[id] = j; }).catch(() => { });
+                }
+            } catch { /* no romper la app */ }
+            return resp;
+        };
+    }).catch(() => { /* contexto en transicion */ });
 }
 
 /** Cuerpo de busqueda con los defaults exactos capturados del trafico real. */
@@ -161,7 +193,8 @@ export function registerAllTools(server) {
             globalPage = (await globalBrowser.pages())[0] || (await globalBrowser.newPage());
             await globalPage.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
             await sleep(3000);
-            return txt("Navegador abierto en " + HOME_URL + ". Las busquedas requieren un captcha que el portal muestra en la pagina: cuando una tool devuelva CAPTCHA PENDIENTE, el usuario lo resuelve y se reintenta la misma tool.");
+            await instalarInterceptor(globalPage);
+            return txt("Navegador abierto en " + HOME_URL + ".\n\nFLUJO RECOMENDADO (el captcha aparece al apretar Buscar y es de un solo uso):\n1. El usuario elige UNA VEZ la seccion en la ventana (camara y tipo, ej. CCF > Sumarios).\n2. Llama a `buscar_asistido` con el texto: el conector completa el campo y aprieta Buscar; el usuario SOLO resuelve el captcha cuando salta. La tool espera y devuelve los sumarios sola.\n3. Alternativa: si el usuario ya busco a mano, `leer_resultados` trae lo que la pagina cargo.\n\nAVISALE antes de buscar_asistido: 'Voy a completar y buscar; cuando aparezca el verificador, resolvelo'.");
         } catch (error) {
             globalBrowser = null; globalPage = null;
             return err(`Error al iniciar el navegador: ${error instanceof Error ? error.message : String(error)}`);
@@ -182,6 +215,109 @@ export function registerAllTools(server) {
         try { await globalBrowser.close(); } catch { /* ignorar */ }
         globalBrowser = null; globalPage = null;
         return txt("Sesion HITL cerrada.");
+    });
+
+    // ---- Captcha inyectado: independiente de la SPA (que a veces no renderiza) --
+    server.tool("preparar_captcha", "Inyecta el widget de captcha oficial del PJN (sitekey JURISPRUDENCIA) directamente en la ventana, sin depender de la interfaz del portal (que a veces carga vacia). El usuario resuelve el captcha que aparece y despues se hace la busqueda. Usar esto cuando la pagina del portal se ve vacia o no muestra el formulario.", {}, async () => {
+        try {
+            const page = await getPage();
+            await instalarInterceptor(page);
+            const r = await page.evaluate(async () => {
+                // Limpia un widget previo
+                document.querySelectorAll(".pjn-captcha-host").forEach((e) => e.remove());
+                const host = document.createElement("div");
+                host.className = "pjn-captcha-host";
+                host.style.cssText = "position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#fff;padding:16px;border:2px solid #354458;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.3)";
+                const titulo = document.createElement("div");
+                titulo.textContent = "Resolvé el captcha para buscar jurisprudencia:";
+                titulo.style.cssText = "font-family:sans-serif;font-size:14px;margin-bottom:8px;color:#354458";
+                const widget = document.createElement("div");
+                widget.className = "pjn-captcha";
+                widget.setAttribute("data-sitekey", "JURISPRUDENCIA");
+                host.appendChild(titulo); host.appendChild(widget); document.body.appendChild(host);
+                // Carga el init.js oficial del captcha (crea el iframe + #captcha-response)
+                await new Promise((res, rej) => {
+                    const s = document.createElement("script");
+                    s.src = "https://captcha.pjn.gov.ar/api/init.js?sitekey=JURISPRUDENCIA&_=" + Date.now();
+                    s.onload = res; s.onerror = () => rej(new Error("no se pudo cargar init.js del captcha"));
+                    document.body.appendChild(s);
+                });
+                await new Promise((r) => setTimeout(r, 800));
+                const tieneInput = !!document.querySelector(".pjn-captcha #captcha-response, #captcha-response");
+                const tieneIframe = !!document.querySelector(".pjn-captcha iframe, iframe[src*='captcha']");
+                return { tieneInput, tieneIframe };
+            });
+            if (!r.tieneIframe && !r.tieneInput) {
+                return err("Inyecte el widget pero no aparecio el iframe del captcha. Puede que el portal haya cambiado el sitekey. Reintenta o avisame.");
+            }
+            return txt(`Widget de captcha inyectado en la ventana (arriba, centrado). Decile al usuario: 'Resolve el captcha que aparecio arriba y avisame con un ok'. Cuando confirme, llama a buscar_jurisprudencia_fed (o por_expediente/por_caratula) con los parametros: el token recien generado se usa solo.`);
+        } catch (error) {
+            return err(`Error en preparar_captcha: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    // ---- Busqueda asistida: el conector completa y clickea, el usuario solo
+    //      resuelve el captcha cuando aparece -------------------------------
+    server.tool("buscar_asistido", "Completa el campo de busqueda EN LA PAGINA y aprieta Buscar; NO bloquea (devuelve enseguida). Despues el usuario resuelve el captcha que salta y se llama `leer_resultados`. Requisito: el usuario debe estar parado en la seccion elegida (camara/tipo ya seleccionados en la ventana). ANTES de llamarla avisale: 'Voy a completar y buscar; cuando salte el verificador, resolvelo y avisame'.", {
+        texto: z.string().describe("Termino o frase a buscar (va al campo de busqueda visible)"),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            await instalarInterceptor(page);
+            const fill = await page.evaluate((texto) => {
+                const vis = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const inputs = [...document.querySelectorAll("input[type='text'], input:not([type]), textarea")].filter(vis);
+                let input = inputs.find((i) => /busc|general|palabra|texto|t[eé]rmino/i.test((i.placeholder || "") + (i.getAttribute("aria-label") || "") + (i.id || ""))) || inputs[0];
+                if (!input) return { ok: false, motivo: "No encontre un campo de texto visible. El usuario debe abrir la seccion de busqueda (elegir camara y tipo) en la ventana." };
+                const proto = input.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+                if (setter) setter.call(input, texto); else input.value = texto;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+                const txtOf = (b) => ((b.textContent || "") + " " + (b.value || "") + " " + (b.getAttribute("aria-label") || "") + " " + (b.title || "") + " " + (b.className || "") + " " + (b.querySelector("i,span,svg") ? b.querySelector("i,span,svg").className : "")).toLowerCase();
+                const cand = [...document.querySelectorAll("button, a, input[type='submit'], input[type='button'], [role='button']")].filter(vis);
+                // 1) por texto/aria/title "buscar"; 2) por icono de lupa (fa-search, search, lupa, magnif)
+                let btn = cand.find((b) => /buscar|consultar/.test(txtOf(b)))
+                    || cand.find((b) => /search|lupa|magnif|fa-search|icon-magnifier|feather-search/.test(txtOf(b)));
+                if (btn) { btn.click(); return { ok: true, via: "boton" }; }
+                // 3) submit del form que contiene el input
+                if (input.form) { try { input.form.requestSubmit ? input.form.requestSubmit() : input.form.submit(); return { ok: true, via: "form-submit" }; } catch { /* sigue */ } }
+                // 4) Enter sobre el input (muchos buscadores disparan asi)
+                for (const type of ["keydown", "keypress", "keyup"]) {
+                    input.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 }));
+                }
+                return { ok: true, via: "enter" };
+            }, args.texto);
+            if (!fill.ok) return err(`buscar_asistido: ${fill.motivo}`);
+            await sleep(2000); // que el modal de captcha alcance a aparecer
+            return txt(`Listo: complete "${args.texto}" y dispare la busqueda (via: ${fill.via}).\n\nDecile al usuario: 'Resolve el captcha que aparecio y avisame con un ok'. Cuando confirme, llama a \`leer_resultados\` (la respuesta queda capturada apenas el portal la entrega, no hace falta el token).`);
+        } catch (error) {
+            return err(`Error en buscar_asistido: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    // ---- Lectura de lo que la propia pagina ya cargo (camino confiable) ----
+    server.tool("leer_resultados", "Devuelve los resultados de la ULTIMA busqueda que el usuario hizo directamente en la pagina del portal (el conector intercepta la respuesta que el portal ya entrego, sin necesitar el token del captcha). Usar despues de que el usuario busco y ve resultados en la ventana.", {}, async () => {
+        try {
+            const page = await getPage();
+            await instalarInterceptor(page);
+            // Poll corto: el usuario pudo acabar de resolver el captcha y el portal
+            // estar entregando la respuesta justo ahora.
+            let cap = null;
+            const deadline = Date.now() + 12000;
+            do {
+                cap = await page.evaluate(() => window.__pjnCaptura || null);
+                if (cap && cap.search) break;
+                await sleep(1500);
+            } while (Date.now() < deadline);
+            if (!cap || !cap.search) {
+                return txt("Todavia no hay resultados capturados. Si el usuario ya resolvio el captcha y ve los resultados en pantalla, reintenta leer_resultados en unos segundos. Si no, que complete la busqueda en la ventana primero.");
+            }
+            return txt(formatearPagina({ json: cap.search, status: 200 }, "Resultados de la busqueda", cap.search.number ?? 0));
+        } catch (error) {
+            return err(`Error en leer_resultados: ${error instanceof Error ? error.message : String(error)}`);
+        }
     });
 
     // ---- Catalogos (sin captcha) -------------------------------------------
@@ -293,9 +429,14 @@ export function registerAllTools(server) {
         try {
             const page = await getPage();
             await irAlBuscador(page);
-            const r = await apiFetch(page, `/api/public/sumarios/${args.id}`);
-            if (r.status !== 200 || !r.json) return err(`Sumario ${args.id} no disponible (status ${r.status}).`);
-            const s = r.json;
+            // 1) si la pagina ya cargo ese detalle (el usuario abrio el sumario), usarlo.
+            let s = await page.evaluate((id) => (window.__pjnCaptura?.detalle?.[id]) || null, String(args.id));
+            // 2) si no, intentar via API (puede requerir token segun el portal).
+            if (!s) {
+                const r = await apiFetch(page, `/api/public/sumarios/${args.id}`);
+                if (r.status !== 200 || !r.json) return err(`Sumario ${args.id} no disponible (status ${r.status}). Si el portal lo pide, abrilo en la ventana y reintento.`);
+                s = r.json;
+            }
             const exp = s.fallo?.expediente;
             let out = `# PJN Jurisprudencia - Sumario ${args.id}\n\n**Titulo:** ${clean(s.titulo)}\n`;
             if (s.subtitulo) out += `**Subtitulo:** ${clean(s.subtitulo)}\n`;

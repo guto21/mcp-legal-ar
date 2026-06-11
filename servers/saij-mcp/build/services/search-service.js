@@ -108,12 +108,21 @@ export class SearchService {
     buildRawQuery(query) {
         if (!query || query === "*:*") return "";
         const q = String(query).trim();
-        // Campo explicito ("titulo: locacion de obra", "tema:despido", etc.):
-        // normaliza a "+campo: palabras?unidas" (sintaxis de la UI de SAIJ).
+        // Verificado en vivo 10/06/2026:
+        //   - "+titulo: despido" y "+texto: despido" devuelven resultados reales.
+        //   - el texto libre sin campo se expande server-side a "contenido:" que
+        //     NO matchea nada (campo muerto) -> se mapea a "texto:".
+        //   - la frase con "?" ("locacion?de?obra") da 0: los stopwords no estan
+        //     en el indice y rompen la frase -> multipalabra = AND de terminos
+        //     por campo, sin stopwords.
+        const STOP = new Set(["de", "la", "el", "los", "las", "y", "o", "u", "del", "al", "en", "por", "para", "con", "sin", "sobre", "a", "e", "un", "una", "unos", "unas", "que", "se", "su", "sus", "lo"]);
         const m = q.match(/^\+?([a-z][a-z-]*):\s*(.+)$/i);
-        if (m) return `+${m[1].toLowerCase()}: ${m[2].trim().split(/\s+/).join("?")}`;
-        // Texto libre: tal cual (el parser del servidor lo expande).
-        return q;
+        const campo = m ? m[1].toLowerCase() : "texto";
+        const valor = (m ? m[2] : q).trim();
+        const palabras = valor.split(/\s+/).filter((w) => w && !STOP.has(w.toLowerCase()));
+        if (!palabras.length) return "";
+        if (palabras.length === 1) return `+${campo}: ${palabras[0]}`;
+        return palabras.map((w) => `+${campo}:${w}`).join(" ");
     }
     async searchRaw(filterStr, params) {
         const queryParams = {
