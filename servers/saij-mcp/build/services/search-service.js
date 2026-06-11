@@ -15,6 +15,26 @@ export class SearchService {
         const lawMatch = text.match(/ley\s*(\d+[\.\d+]*)/i);
         if (lawMatch) {
             const lawNumber = lawMatch[1].replace(/\./g, "");
+            // FIX 11/06/2026 (verificado en vivo): buscar por texto libre traia
+            // cualquier norma que MENCIONARA el numero (ej. una adhesion
+            // provincial) en vez de la ley misma. El campo numero-norma del
+            // indice matchea exacto: numero-norma:24240 + tipo Ley +
+            // jurisdiccion Nacional devuelve unicamente la Ley 24.240.
+            for (const jurisdiccion of ["Nacional", undefined]) {
+                const exactos = await this.searchLegislacion({
+                    query: `numero-norma:${lawNumber}`,
+                    tipoNorma: "Ley",
+                    jurisdiccion,
+                    offset: 0,
+                    pageSize: 1,
+                    view: "colapsada",
+                });
+                if (exactos.results.length > 0) {
+                    return await documentService.getFullDocument(exactos.results[0].uuid);
+                }
+            }
+            // Fallback historico: texto libre (puede traer normas que solo
+            // citan el numero; mejor que nada si numero-norma no matcheo)
             const results = await this.searchLegislacion({ query: lawNumber, offset: 0, pageSize: 1, view: "colapsada" });
             if (results.results.length > 0) {
                 return await documentService.getFullDocument(results.results[0].uuid);
@@ -89,12 +109,56 @@ export class SearchService {
      * Retrieves the latest legal news (novedades).
      */
     async getNovedades(limit = 10) {
-        return this.searchRaw(PRESET_FILTERS.novedades || "Publicación/Novedad", {
+        // FIX 11/06/2026 v2 (re-test ronda 10, capturado de la portada real):
+        // la home de saij.gob.ar pide las novedades con r=destacada:1, f=Total
+        // y p=500, y ORDENA EN EL CLIENTE por fecha (parserFechaCompleta en su
+        // JS). El intento v1 (s=fecha-rango|DESC sobre la faceta
+        // "Publicación/Novedad") fallaba porque esa faceta es un indice viejo
+        // (datos 2017) y el orden server-side no aplico ahi. Se replica
+        // exactamente lo que hace la portada: traer destacadas y ordenar aca.
+        const extraerFecha = (abstract) => {
+            if (typeof abstract !== "string")
+                return null;
+            const iso = abstract.match(/"fecha[^"]*"\s*:\s*"(\d{4})-(\d{2})-(\d{2})/);
+            if (iso)
+                return `${iso[1]}-${iso[2]}-${iso[3]}`;
+            const esp = abstract.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (esp)
+                return `${esp[3]}-${esp[2]}-${esp[1]}`;
+            const anio = abstract.match(/"fecha[^"]*"\s*:\s*"(\d{4})"/);
+            return anio ? `${anio[1]}-01-01` : null;
+        };
+        try {
+            const res = await this.searchRaw("Total", {
+                rawQuery: "destacada:1",
+                pageSize: 500,
+                offset: 0,
+                view: "detallada",
+            });
+            if (res.results.length > 0) {
+                const ordenados = res.results
+                    .map((r) => ({ r, fecha: extraerFecha(r.document_abstract) }))
+                    .sort((a, b) => (b.fecha || "0000").localeCompare(a.fecha || "0000"));
+                return {
+                    ...res,
+                    page_size: limit,
+                    results: ordenados.slice(0, Math.max(1, limit)).map((x) => x.r),
+                    query: "destacada:1 (novedades de portada, orden por fecha desc aplicado client-side)",
+                };
+            }
+        }
+        catch (_e) {
+            // cae al fallback historico
+        }
+        // Fallback: faceta historica de novedades (indice viejo, sin orden)
+        const res = await this.searchRaw(PRESET_FILTERS.novedades || "Publicación/Novedad", {
             query: "*:*",
             pageSize: limit,
             offset: 0,
             view: "detallada",
         });
+        res.advertencia = "Se uso el indice historico 'Publicación/Novedad' (la consulta de portada destacada:1 fallo o vino vacia); las fechas pueden ser viejas. Verificar antes de usar.";
+        return res;
     }
     /**
      * Generic search using a raw filter string.
@@ -129,10 +193,14 @@ export class SearchService {
             o: (params.offset || 0).toString(),
             p: (params.pageSize || 20).toString(),
             f: filterStr,
-            s: "",
+            // `s` es el parametro de ORDEN (no el termino de busqueda, que va
+            // en `r`). Vacio = orden por relevancia del indice.
+            s: params.sort || "",
             v: params.view || "colapsada",
         };
-        const r = this.buildRawQuery(params.query);
+        // rawQuery explicito (passthrough, ej. "destacada:1" como lo manda la
+        // portada) tiene prioridad sobre la construccion desde params.query.
+        const r = params.rawQuery !== undefined ? params.rawQuery : this.buildRawQuery(params.query);
         if (r) queryParams.r = r;
         const data = await apiClient.get("/busqueda", {
             params: queryParams,

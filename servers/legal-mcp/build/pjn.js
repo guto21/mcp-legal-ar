@@ -299,7 +299,12 @@ async function ejecutarBusqueda(page, contexto, botonId) {
 
 export function registerAllTools(server) {
     // ---- Sesion HITL -------------------------------------------------------
-    server.tool("iniciar_hitl_browser", "Abre el navegador interactivo (HITL) en la consulta publica del PJN. ANTES de llamar esta tool, avisale al usuario: 'Se va a abrir una ventana de Chromium; si muestra un verificador (captcha), resolvelo y avisame'. El usuario resuelve el captcha cuando el portal lo pida. La sesion queda viva y las demas tools operan dentro de ella.", {}, async () => {
+    server.tool("iniciar_hitl_browser", "Abre el navegador interactivo (HITL) en la consulta publica del PJN. REGLA: el usuario tiene que enterarse ANTES de que se abra la ventana, no despues. Avisale en tu respuesta PREVIA: 'Se va a abrir una ventana de Chromium; si muestra un verificador (captcha), resolvelo y avisame'. Recien entonces llama esta tool con aviso_dado=true. La sesion queda viva y las demas tools operan dentro de ella.", {
+        aviso_dado: z.boolean().optional().default(false).describe("OBLIGATORIO en true. Confirma que en tu mensaje ANTERIOR ya le avisaste al usuario que se abre una ventana de Chromium y que debe resolver el verificador (captcha) si aparece. Si no se lo dijiste todavia, NO llames esta tool: avisale primero."),
+    }, async (args) => {
+        if (!args.aviso_dado) {
+            return err("NO se abrio la ventana. Primero avisale al usuario: 'Voy a abrir una ventana de Chromium para la consulta del PJN; si muestra un verificador (captcha), resolvelo y avisame'. Despues volve a llamar esta tool con aviso_dado=true.");
+        }
         if (pageViva()) {
             return txt("El navegador ya esta abierto. La sesion HITL sigue viva; podes buscar directamente.");
         }
@@ -357,7 +362,7 @@ export function registerAllTools(server) {
         }
     });
 
-    server.tool("pjn_buscar_expediente_por_parte", "Busca expedientes por nombre de parte en la consulta publica del PJN. LIMITACION DEL PORTAL: la consulta publica anonima solo admite tipo de parte DEMANDADO. Requiere sesion HITL activa.", {
+    server.tool("pjn_buscar_expediente_por_parte", "Busca expedientes por nombre de parte en la consulta publica del PJN. LIMITACION DEL PORTAL: la consulta publica anonima solo admite tipo de parte DEMANDADO. PRERREQUISITO: requiere sesion HITL activa; ejecutar antes iniciar_hitl_browser (una sola vez por sesion). Si el portal pide captcha, lo resuelve el usuario y luego se llama continuar_tras_captcha.", {
         jurisdiccion: z.enum(JURISDICCIONES).describe("Codigo de camara/jurisdiccion (ej. CIV, CNT, COM)"),
         nombre: z.string().describe("Apellido y nombre o razon social de la parte demandada (ej. 'gomez pablo')"),
     }, async (args) => {

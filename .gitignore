@@ -25,3 +25,12 @@ Thumbs.db
 # Editores
 .vscode/
 .idea/
+
+# Reportes de tests/auditoria - viven en ..\mcp-legal-ar test, NO en el repo
+REPORTE_*.md
+RESUMEN_*.md
+AUDITORIA_*.md
+RETEST_*.md
+
+# Capturas de diagnostico de portales
+_capturas/

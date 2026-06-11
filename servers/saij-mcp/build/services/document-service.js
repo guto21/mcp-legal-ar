@@ -4,6 +4,61 @@ import pdf from "pdf-parse";
 import { createWorker } from "tesseract.js";
 import { CONFIG } from "../config.js";
 /**
+ * FIX 11/06/2026 (re-test ronda 10): SAIJ devuelve algunos campos textuales
+ * (sumario, texto, magistrados) a veces como string y a veces como object o
+ * array de objetos (ej. {sumario: "..."} o [{"#text": "..."}]). El parser
+ * asumia string y rompia resolve_citation/get_document con ZodError.
+ * plano() normaliza cualquier forma a string.
+ */
+function plano(v) {
+    if (v === null || v === undefined)
+        return v;
+    if (typeof v === "string")
+        return v;
+    if (Array.isArray(v)) {
+        const partes = v.map(plano).filter((s) => typeof s === "string" && s.trim());
+        return partes.length ? partes.join("\n\n") : null;
+    }
+    if (typeof v === "object") {
+        for (const k of ["sumario", "#text", "texto", "descripcion", "abstract", "contenido"]) {
+            if (typeof v[k] === "string" && v[k].trim())
+                return v[k];
+        }
+        const partes = Object.values(v).map(plano).filter((s) => typeof s === "string" && s.trim());
+        return partes.length ? partes.join("\n") : null;
+    }
+    return String(v);
+}
+/**
+ * FIX 11/06/2026 v2 (re-test ronda 11): el articulado puede venir en
+ * content.articulo, content.segmento.articulo o anidado en particiones
+ * (particiones > particion > articulo, a cualquier profundidad - asi viene
+ * la Ley 24.240 con sus capitulos). Recolecta recursivamente todo objeto
+ * bajo una clave "articulo", en orden de documento.
+ */
+function recolectarArticulos(nodo, acc = []) {
+    if (!nodo || typeof nodo !== "object")
+        return acc;
+    if (Array.isArray(nodo)) {
+        for (const n of nodo)
+            recolectarArticulos(n, acc);
+        return acc;
+    }
+    for (const [k, v] of Object.entries(nodo)) {
+        if (k === "articulo") {
+            const arts = Array.isArray(v) ? v : [v];
+            for (const a of arts) {
+                if (a && typeof a === "object")
+                    acc.push(a);
+            }
+        }
+        else if (v && typeof v === "object") {
+            recolectarArticulos(v, acc);
+        }
+    }
+    return acc;
+}
+/**
  * DocumentService handles fetching full document content and metadata.
  * It implements specialized extraction logic for different document types.
  */
@@ -42,7 +97,7 @@ export class DocumentService {
         switch (metadata.document_type) {
             case DocumentType.JURISPRUDENCIA:
                 // Try to get text from API JSON first
-                let texto = content.texto;
+                let texto = plano(content.texto);
                 if (texto && texto.length > 100) {
                     result.texto_completo = texto;
                 }
@@ -72,34 +127,33 @@ export class DocumentService {
                     }
                 }
                 break;
-            case DocumentType.LEGISLACION:
-                // Concatenate articles from extra.articulo
-                const articulos = content.articulo;
-                if (Array.isArray(articulos)) {
-                    result.texto_completo = articulos
-                        .map((art) => {
-                        const num = art["numero-articulo"] || "";
-                        const text = art["texto-articulo"] || "";
-                        return `Artículo ${num}\n${text}`;
-                    })
-                        .join("\n\n");
-                }
-                else if (articulos && typeof articulos === "object") {
-                    const num = articulos["numero-articulo"] || "";
-                    const text = articulos["texto-articulo"] || "";
-                    result.texto_completo = `Artículo ${num}\n${text}`;
+            case DocumentType.LEGISLACION: {
+                // FIX 11/06/2026 v2: recoleccion RECURSIVA del articulado
+                // (content.articulo, segmento.articulo o particiones anidadas,
+                // como la Ley 24.240). El texto del articulo puede llamarse
+                // "texto-articulo" o "texto" (con tags [[p]]).
+                const limpiarTags = (s) => typeof s === "string" ? s.replace(/\[\[\/?p\]\]/g, "\n").trim() : s;
+                const fmtArticulo = (art) => {
+                    const num = plano(art["numero-articulo"]) || "";
+                    const text = limpiarTags(plano(art["texto-articulo"]) || plano(art.texto)) || "";
+                    return `Artículo ${num}\n${text}`;
+                };
+                const articulos = recolectarArticulos(content);
+                if (articulos.length > 0) {
+                    result.texto_completo = articulos.map(fmtArticulo).join("\n\n");
                 }
                 break;
+            }
             case DocumentType.SUMARIO:
                 // Clean [[p]] tags from texto field
-                let sumarioTexto = content.texto || content.sumario;
+                let sumarioTexto = plano(content.texto) || plano(content.sumario);
                 if (sumarioTexto) {
                     result.texto_completo = sumarioTexto.replace(/\[\[p\]\]/g, "\n");
                 }
                 break;
             default:
                 // Default to any available text field
-                result.texto_completo = content.texto || content.sumario || content["texto-completo"] || null;
+                result.texto_completo = plano(content.texto) || plano(content.sumario) || plano(content["texto-completo"]) || null;
         }
         return result;
     }
@@ -113,19 +167,23 @@ export class DocumentService {
         const content = docData.document?.content || {};
         let sectionText = null;
         if (metadata.document_type === DocumentType.LEGISLACION) {
-            const articulos = content.articulo;
+            // FIX 11/06/2026: mismas variantes de forma que en getFullDocument
+            // (articulo plano o anidado en segmento; texto-articulo o texto).
+            const limpiarTags = (s) => typeof s === "string" ? s.replace(/\[\[\/?p\]\]/g, "\n").trim() : s;
+            const textoDe = (a) => limpiarTags(plano(a["texto-articulo"]) || plano(a.texto)) || "";
+            const articulos = recolectarArticulos(content);
             if (Array.isArray(articulos)) {
                 if (options.articleNumber) {
                     const art = articulos.find((a) => String(a["numero-articulo"]) === options.articleNumber);
                     if (art) {
-                        sectionText = `Artículo ${art["numero-articulo"]}\n${art["texto-articulo"]}`;
+                        sectionText = `Artículo ${art["numero-articulo"]}\n${textoDe(art)}`;
                     }
                 }
                 else if (options.sectionTitle) {
-                    const matched = articulos.filter((a) => (a["texto-articulo"] || "").toLowerCase().includes(options.sectionTitle.toLowerCase()));
+                    const matched = articulos.filter((a) => textoDe(a).toLowerCase().includes(options.sectionTitle.toLowerCase()));
                     if (matched.length > 0) {
                         sectionText = matched
-                            .map((a) => `Artículo ${a["numero-articulo"]}\n${a["texto-articulo"]}`)
+                            .map((a) => `Artículo ${a["numero-articulo"]}\n${textoDe(a)}`)
                             .join("\n\n");
                     }
                 }
@@ -158,16 +216,20 @@ export class DocumentService {
                 extra[key] = content[key];
             }
         }
+        const numeroFalloCrudo = content["numero-fallo"];
+        const numeroFallo = typeof numeroFalloCrudo === "number"
+            ? numeroFalloCrudo
+            : (typeof numeroFalloCrudo === "string" && /^\d+$/.test(numeroFalloCrudo.trim()) ? Number(numeroFalloCrudo) : null);
         const metadata = {
-            id_saij,
+            id_saij: plano(id_saij) || "",
             uuid: guid,
             document_type: docType,
-            tribunal: content.tribunal,
-            fecha: content.fecha,
+            tribunal: plano(content.tribunal),
+            fecha: plano(content.fecha),
             caratula: this.buildCaratula(content),
-            sumario: content.sumario,
-            magistrates: content.magistrados,
-            numero_fallo: content["numero-fallo"],
+            sumario: plano(content.sumario),
+            magistrates: plano(content.magistrados),
+            numero_fallo: numeroFallo,
             fuero: this.inferFuero(content.tribunal || ""),
             provincia: content.provincia,
             tipo_fallo: content["tipo-fallo"],
@@ -192,10 +254,10 @@ export class DocumentService {
         return DocumentType.UNKNOWN;
     }
     buildCaratula(content) {
-        const actor = content.actor || "S/C";
-        const sobre = content.sobre || "S/D";
+        const actor = plano(content.actor) || "S/C";
+        const sobre = plano(content.sobre) || "S/D";
         if (actor === "S/C" && sobre === "S/D") {
-            return content.titulo || content["titulo-norma"] || null;
+            return plano(content.titulo) || plano(content["titulo-norma"]) || null;
         }
         return `${actor} s/ ${sobre}`;
     }

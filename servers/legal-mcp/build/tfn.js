@@ -399,11 +399,28 @@ export function registerAllTools(server) {
     );
 
     server.tool("descargar_resolucion_pdf",
-        "Descarga el PDF de una resolucion del TFN por su ID.",
+        "Descarga el PDF de una resolucion del TFN por su ID (campo registro o fallo_id obtenido de las herramientas de busqueda, ej: INLEG-2023-122808728-APN-VOCVI#TFN).",
         {
-            id_resolucion: z.string().describe("ID de la resolucion (registro o fallo_id).")
+            id_resolucion: z.string().describe("ID de la resolucion (registro o fallo_id, ej: INLEG-2023-122808728-APN-VOCVI#TFN o un fallo_id numerico).")
         },
         async (args) => {
+            // FIX auditoria 11/06/2026: validar el ID antes de construir la URL.
+            // Antes, un ID arbitrario (ej. "test-invalid-id") generaba una URL
+            // malformada que se devolvia al usuario como si fuera un link valido.
+            const id = (args.id_resolucion || "").trim();
+            const esGde = /^[A-Z]{2,8}-\d{4}-\d+(-[A-Z0-9]+)*(#[A-Z0-9]+)?$/i.test(id);
+            const esNumerico = /^\d+$/.test(id);
+            if (!esGde && !esNumerico) {
+                return {
+                    content: [{ type: "text", text: JSON.stringify({
+                        error: "ID de resolucion invalido",
+                        valor_recibido: id,
+                        formato_esperado: "Registro GDE (ej: INLEG-2023-122808728-APN-VOCVI#TFN) o fallo_id numerico",
+                        sugerencia: "Obtene el ID con buscar_resoluciones_tfn, buscar_ultimos_impositivos o buscar_ultimos_aduaneros (campo 'registro' o 'fallo_id')."
+                    }, null, 2) }],
+                    isError: true
+                };
+            }
             try {
                 const url = `${TFN_BASE_URL}/fallo/${encodeURIComponent(args.id_resolucion)}/pdf`;
                 const response = await axiosClient.get(url, {
@@ -427,8 +444,17 @@ export function registerAllTools(server) {
                 };
             } catch (error) {
                 const url = `${TFN_BASE_URL}/fallo/${encodeURIComponent(args.id_resolucion)}/pdf`;
+                const status = error?.response?.status;
                 return {
-                    content: [{ type: "text", text: `No se pudo descargar el PDF.\n\nLink directo: ${url}` }],
+                    content: [{ type: "text", text: JSON.stringify({
+                        error: "No se pudo descargar el PDF",
+                        id_resolucion: args.id_resolucion,
+                        http_status: status || null,
+                        detalle: status === 404
+                            ? "El TFN no tiene un fallo registrado con ese ID. Verifica el ID con las herramientas de busqueda."
+                            : (error instanceof Error ? error.message : String(error)),
+                        url_intentada: url
+                    }, null, 2) }],
                     isError: true
                 };
             }

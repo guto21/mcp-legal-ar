@@ -185,7 +185,12 @@ async function buscarSumarios(page, body, { pagina = 0, contexto }) {
 
 export function registerAllTools(server) {
     // ---- Sesion HITL -------------------------------------------------------
-    server.tool("iniciar_hitl_browser", "Abre el navegador interactivo (HITL) en el Sistema de Jurisprudencia del PJN (sj.pjn.gov.ar). ANTES de llamar esta tool avisale al usuario: 'Se va a abrir una ventana de Chromium; cuando hagas una busqueda puede aparecer un verificador (captcha) en la pagina: resolvelo y avisame'.", {}, async () => {
+    server.tool("iniciar_hitl_browser", "Abre el navegador interactivo (HITL) en el Sistema de Jurisprudencia del PJN (sj.pjn.gov.ar). REGLA: el usuario tiene que enterarse ANTES de que se abra la ventana, no despues. Avisale en tu respuesta PREVIA: 'Se va a abrir una ventana de Chromium; cuando hagas una busqueda puede aparecer un verificador (captcha): resolvelo y avisame'. Recien entonces llama esta tool con aviso_dado=true.", {
+        aviso_dado: z.boolean().optional().default(false).describe("OBLIGATORIO en true. Confirma que en tu mensaje ANTERIOR ya le avisaste al usuario que se abre una ventana de Chromium y que debe resolver el verificador (captcha) cuando aparezca. Si no se lo dijiste todavia, NO llames esta tool: avisale primero."),
+    }, async (args) => {
+        if (!args.aviso_dado) {
+            return err("NO se abrio la ventana. Primero avisale al usuario: 'Voy a abrir una ventana de Chromium para buscar jurisprudencia; cuando aparezca un verificador (captcha), resolvelo y avisame'. Despues volve a llamar esta tool con aviso_dado=true.");
+        }
         if (pageViva()) return txt("El navegador ya esta abierto; la sesion sigue viva.");
         try {
             const { default: puppeteer } = await import("puppeteer");
@@ -218,11 +223,12 @@ export function registerAllTools(server) {
     });
 
     // ---- Captcha inyectado: independiente de la SPA (que a veces no renderiza) --
-    server.tool("preparar_captcha", "Inyecta el widget de captcha oficial del PJN (sitekey JURISPRUDENCIA) directamente en la ventana, sin depender de la interfaz del portal (que a veces carga vacia). El usuario resuelve el captcha que aparece y despues se hace la busqueda. Usar esto cuando la pagina del portal se ve vacia o no muestra el formulario.", {}, async () => {
-        try {
-            const page = await getPage();
-            await instalarInterceptor(page);
-            const r = await page.evaluate(async () => {
+    // Inyeccion del widget oficial de captcha del PJN, compartida por
+    // preparar_captcha y por el auto-pivote de buscar_asistido cuando la SPA
+    // renderiza vacia (FIX 11/06/2026: antes buscar_asistido prometia un
+    // captcha que nunca aparecia si no habia UI).
+    const inyectarCaptcha = async (page) => {
+        return page.evaluate(async () => {
                 // Limpia un widget previo
                 document.querySelectorAll(".pjn-captcha-host").forEach((e) => e.remove());
                 const host = document.createElement("div");
@@ -246,7 +252,14 @@ export function registerAllTools(server) {
                 const tieneInput = !!document.querySelector(".pjn-captcha #captcha-response, #captcha-response");
                 const tieneIframe = !!document.querySelector(".pjn-captcha iframe, iframe[src*='captcha']");
                 return { tieneInput, tieneIframe };
-            });
+        });
+    };
+
+    server.tool("preparar_captcha", "Inyecta el widget de captcha oficial del PJN (sitekey JURISPRUDENCIA) directamente en la ventana, sin depender de la interfaz del portal (que a veces carga vacia). El usuario resuelve el captcha que aparece y despues se hace la busqueda. Usar esto cuando la pagina del portal se ve vacia o no muestra el formulario.", {}, async () => {
+        try {
+            const page = await getPage();
+            await instalarInterceptor(page);
+            const r = await inyectarCaptcha(page);
             if (!r.tieneIframe && !r.tieneInput) {
                 return err("Inyecte el widget pero no aparecio el iframe del captcha. Puede que el portal haya cambiado el sitekey. Reintenta o avisame.");
             }
@@ -258,7 +271,7 @@ export function registerAllTools(server) {
 
     // ---- Busqueda asistida: el conector completa y clickea, el usuario solo
     //      resuelve el captcha cuando aparece -------------------------------
-    server.tool("buscar_asistido", "Completa el campo de busqueda EN LA PAGINA y aprieta Buscar; NO bloquea (devuelve enseguida). Despues el usuario resuelve el captcha que salta y se llama `leer_resultados`. Requisito: el usuario debe estar parado en la seccion elegida (camara/tipo ya seleccionados en la ventana). ANTES de llamarla avisale: 'Voy a completar y buscar; cuando salte el verificador, resolvelo y avisame'.", {
+    server.tool("buscar_asistido", "Completa el campo de busqueda EN LA PAGINA y aprieta Buscar; NO bloquea (devuelve enseguida). Despues el usuario resuelve el captcha que salta y se llama `leer_resultados`. Requisito: el usuario debe estar parado en la seccion elegida (camara/tipo ya seleccionados en la ventana). Si la SPA renderizo VACIA (bug conocido), la tool lo detecta sola, inyecta el widget de captcha oficial y la respuesta indica seguir con `buscar_jurisprudencia_fed`. ANTES de llamarla avisale: 'Voy a completar y buscar; cuando salte el verificador, resolvelo y avisame'.", {
         texto: z.string().describe("Termino o frase a buscar (va al campo de busqueda visible)"),
     }, async (args) => {
         try {
@@ -268,7 +281,13 @@ export function registerAllTools(server) {
                 const vis = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
                 const inputs = [...document.querySelectorAll("input[type='text'], input:not([type]), textarea")].filter(vis);
                 let input = inputs.find((i) => /busc|general|palabra|texto|t[eé]rmino/i.test((i.placeholder || "") + (i.getAttribute("aria-label") || "") + (i.id || ""))) || inputs[0];
-                if (!input) return { ok: false, motivo: "No encontre un campo de texto visible. El usuario debe abrir la seccion de busqueda (elegir camara y tipo) en la ventana." };
+                if (!input) {
+                    // Distinguir "el usuario no abrio la seccion" de "la SPA
+                    // renderizo vacia" (bug conocido de sj.pjn.gov.ar bajo
+                    // Puppeteer: la ruta queda en blanco y NO hay UI posible).
+                    const textoVisible = (document.body && document.body.innerText || "").trim();
+                    return { ok: false, spaVacia: textoVisible.length < 80, motivo: "No encontre un campo de texto visible." };
+                }
                 const proto = input.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
                 const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
                 if (setter) setter.call(input, texto); else input.value = texto;
@@ -289,9 +308,48 @@ export function registerAllTools(server) {
                 }
                 return { ok: true, via: "enter" };
             }, args.texto);
-            if (!fill.ok) return err(`buscar_asistido: ${fill.motivo}`);
-            await sleep(2000); // que el modal de captcha alcance a aparecer
-            return txt(`Listo: complete "${args.texto}" y dispare la busqueda (via: ${fill.via}).\n\nDecile al usuario: 'Resolve el captcha que aparecio y avisame con un ok'. Cuando confirme, llama a \`leer_resultados\` (la respuesta queda capturada apenas el portal la entrega, no hace falta el token).`);
+            if (!fill.ok) {
+                // FIX 11/06/2026: si la SPA renderizo vacia no hay formulario
+                // ni captcha que el usuario pueda usar; antes esta tool
+                // igualmente prometia un verificador que nunca aparecia.
+                // Auto-pivote: inyectar el widget oficial y seguir por API.
+                if (fill.spaVacia) {
+                    const r = await inyectarCaptcha(page);
+                    if (r.tieneIframe || r.tieneInput) {
+                        return txt(`La pagina del portal renderizo VACIA (bug conocido de la SPA bajo Puppeteer), asi que no hay formulario para completar. Ya inyecte el widget de captcha oficial en la ventana (arriba, centrado).\n\nDecile al usuario: 'La pagina cargo en blanco, pero te puse el verificador arriba de la ventana: resolvelo y avisame con un ok'. Cuando confirme, llama a \`buscar_jurisprudencia_fed\` con texto "${args.texto}" (y la camara que corresponda): la busqueda sale por API y no necesita la interfaz.`);
+                    }
+                    return err(`buscar_asistido: la pagina renderizo vacia y la inyeccion del widget de captcha tambien fallo. Cerra y reabri con finalizar_hitl_browser + iniciar_hitl_browser, o usa preparar_captcha a mano.`);
+                }
+                return err(`buscar_asistido: ${fill.motivo} El usuario debe abrir la seccion de busqueda (elegir camara y tipo) en la ventana; si la pagina se ve en blanco, usa preparar_captcha + buscar_jurisprudencia_fed.`);
+            }
+            // FIX 11/06/2026 v2 (re-test ronda 11): la SPA puede renderizar con
+            // un input suelto pero SIN la seccion real de busqueda; el disparo
+            // no produce nada (ni captcha ni request) y antes esta tool igual
+            // prometia un verificador inexistente. Verificacion post-disparo:
+            // o aparecio el captcha, o salio la request, o pivoteamos.
+            const t0 = Date.now();
+            let estado = null;
+            for (let i = 0; i < 4; i++) {
+                await sleep(2000);
+                estado = await page.evaluate(() => ({
+                    captcha: !!document.querySelector("iframe[src*='captcha'], #captcha-response, .pjn-captcha"),
+                    searchTs: (window.__pjnCaptura && window.__pjnCaptura.searchTs) || 0,
+                })).catch(() => null);
+                if (estado && (estado.captcha || estado.searchTs >= t0)) break;
+            }
+            if (estado && estado.searchTs >= t0) {
+                return txt(`Listo: complete "${args.texto}", dispare la busqueda (via: ${fill.via}) y el portal YA respondio sin pedir captcha. Llama directo a \`leer_resultados\`.`);
+            }
+            if (estado && estado.captcha) {
+                return txt(`Listo: complete "${args.texto}" y dispare la busqueda (via: ${fill.via}); aparecio el verificador.\n\nDecile al usuario: 'Resolve el captcha que aparecio y avisame con un ok'. Cuando confirme, llama a \`leer_resultados\` (la respuesta queda capturada apenas el portal la entrega, no hace falta el token).`);
+            }
+            // El disparo no produjo nada: la seccion real no estaba cargada
+            // (SPA rota aunque haya un campo de texto suelto). Pivote.
+            const r = await inyectarCaptcha(page);
+            if (r.tieneIframe || r.tieneInput) {
+                return txt(`Complete "${args.texto}" y dispare la busqueda (via: ${fill.via}), pero el portal NO reacciono en 8s (ni captcha ni respuesta): la seccion de busqueda de la SPA no esta cargada de verdad. Ya inyecte el widget de captcha oficial en la ventana (arriba, centrado).\n\nDecile al usuario: 'El buscador de la pagina no respondio, pero te puse el verificador arriba de la ventana: resolvelo y avisame con un ok'. Cuando confirme, llama a \`buscar_jurisprudencia_fed\` con texto "${args.texto}" (y la camara que corresponda): la busqueda sale por API y no necesita la interfaz.`);
+            }
+            return err(`buscar_asistido: el disparo no produjo nada y la inyeccion del widget tambien fallo. Cerra y reabri la sesion (finalizar_hitl_browser + iniciar_hitl_browser) y proba preparar_captcha + buscar_jurisprudencia_fed.`);
         } catch (error) {
             return err(`Error en buscar_asistido: ${error instanceof Error ? error.message : String(error)}`);
         }

@@ -944,7 +944,7 @@ async function fetchCleanText(idNorma, textoHtmlManual, tipoTexto = "actualizado
     try {
         const realUrl = await resolveTextUrlFromVerNorma(idNorma, tipoTexto);
         const html = await fetchInfoLegStaticHtml(realUrl);
-        return { text: cleanInfoLegHtml(html), url: realUrl };
+        return { text: cleanInfoLegHtml(html), url: realUrl, advertencia: "Texto obtenido por mecanismo de respaldo (resolución vía ficha verNorma.do); la URL estática directa falló." };
     }
     catch (err) {
         lastError = err;
@@ -964,7 +964,7 @@ async function fetchCleanText(idNorma, textoHtmlManual, tipoTexto = "actualizado
     for (const url of candidates) {
         try {
             const html = await fetchWithPuppeteer(url);
-            return { text: cleanInfoLegHtml(html), url };
+            return { text: cleanInfoLegHtml(html), url, advertencia: "Texto obtenido por mecanismo de respaldo (navegador Puppeteer); la descarga HTTP directa falló, posible bloqueo del WAF de servicios.infoleg." };
         }
         catch {
             // continúa
@@ -974,7 +974,7 @@ async function fetchCleanText(idNorma, textoHtmlManual, tipoTexto = "actualizado
     try {
         const realUrl = await resolveTextUrlFromVerNorma(idNorma, tipoTexto, fetchWithPuppeteer);
         const html = await fetchWithPuppeteer(realUrl);
-        return { text: cleanInfoLegHtml(html), url: realUrl };
+        return { text: cleanInfoLegHtml(html), url: realUrl, advertencia: "Texto obtenido por mecanismo de respaldo (ficha verNorma.do + navegador Puppeteer); las vías directas fallaron." };
     }
     catch (err) {
         lastError = err;
@@ -1258,6 +1258,7 @@ export function registerAllTools(server) {
                 responseText += `* **ID de la Norma:** \`${idNorma}\`\n`;
                 responseText += `* **Variante:** \`${tipoTexto.toUpperCase()}\`\n`;
                 responseText += `* **Método de consulta:** Lectura de texto copiado manualmente\n\n`;
+                responseText += `> ⚠️ **Advertencia (workaround manual):** este texto fue provisto por el usuario y NO fue verificado contra la fuente oficial de InfoLEG. Antes de citar articulado, contrastar con https://servicios.infoleg.gob.ar/infolegInternet/verNorma.do?id=${idNorma}\n\n`;
                 responseText += `## Cuerpo Normativo\n\n${cleanText}`;
                 return { content: [{ type: "text", text: responseText }] };
             }

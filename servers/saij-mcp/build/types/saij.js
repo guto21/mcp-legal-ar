@@ -160,16 +160,29 @@ export var DocumentType;
 /**
  * Interfaces & Zod Schemas based on Python models
  */
+// FIX 11/06/2026: SAIJ entrega campos textuales a veces como object/array
+// (ej. sumario). Ultima linea de defensa: cualquier no-string se serializa
+// en vez de tirar ZodError (la normalizacion fina vive en document-service).
+const textoFlexible = z.preprocess((v) => {
+    if (v === null || v === undefined || typeof v === "string")
+        return v;
+    try {
+        return JSON.stringify(v);
+    }
+    catch {
+        return String(v);
+    }
+}, z.string().optional().nullable());
 export const DocumentMetadataSchema = z.object({
     id_saij: z.string(),
     uuid: z.string(),
     document_type: z.nativeEnum(DocumentType).default(DocumentType.UNKNOWN),
-    tribunal: z.string().optional().nullable(),
-    fecha: z.string().optional().nullable(),
-    caratula: z.string().optional().nullable(),
-    sumario: z.string().optional().nullable(),
+    tribunal: textoFlexible,
+    fecha: textoFlexible,
+    caratula: textoFlexible,
+    sumario: textoFlexible,
     numero_fallo: z.number().optional().nullable(),
-    magistrates: z.string().optional().nullable(),
+    magistrates: textoFlexible,
     fuero: z.string().optional().nullable(),
     provincia: z.string().optional().nullable(),
     tipo_fallo: z.string().optional().nullable(),

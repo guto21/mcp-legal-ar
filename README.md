@@ -184,6 +184,21 @@ Algunos conectores dependen de que las webs oficiales estén disponibles. Si una
 
 ---
 
+## Repo: actualización y reportes de tests
+
+- Los reportes de tests y auditorías NO se versionan: viven en la carpeta
+  hermana `..\mcp-legal-ar test` y están en `.gitignore`
+  (`REPORTE_*.md`, `RESUMEN_*.md`, `AUDITORIA_*.md`, `RETEST_*.md`, `_capturas/`).
+- Para actualizar el repo con las mejoras: doble click en `actualizar-repo.bat`
+  (mueve reportes sueltos a la carpeta de tests, commitea todo con fecha y pushea).
+- Para que corra solo (semanal, viernes 18:00), ejecutar una vez en CMD:
+
+```
+schtasks /create /tn "mcp-legal-ar actualizar repo" /tr "\"C:\Users\Ximena\mcp-legal-ar\actualizar-repo.bat\"" /sc weekly /d FRI /st 18:00
+```
+
+---
+
 ## Créditos
 
 Este repositorio únicamente unifica servidores MCP desarrollados por otros. Todo el mérito de cada conector corresponde a sus autores originales:
