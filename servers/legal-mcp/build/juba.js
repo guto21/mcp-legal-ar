@@ -188,7 +188,23 @@ function formatSumarios(sumarios, stats) {
 // ─────────────────────────────────────────────────────────────────
 // SCRAPERS INTERNOS
 // ─────────────────────────────────────────────────────────────────
+// Validación de entrada (fix ronda 19, tests 27-28): el buscador de JUBA
+// devuelve HTTP 500 ante strings muy largos y procesa búsquedas vacías
+// como "TODOS" con 0 resultados. Se valida acá (cuello de botella de las
+// 18 tools de búsqueda) para devolver un error MCP claro antes del POST.
+const JUBA_MAX_QUERY_LENGTH = 500;
+function validateJubaQuery(query) {
+    const q = (query ?? "").toString().trim();
+    if (q.length === 0) {
+        throw new Error("El término de búsqueda no puede estar vacío. Ingresá al menos una palabra (ej. 'daño moral').");
+    }
+    if (q.length > JUBA_MAX_QUERY_LENGTH) {
+        throw new Error(`El término de búsqueda supera el máximo de ${JUBA_MAX_QUERY_LENGTH} caracteres (recibido: ${q.length}). El buscador de JUBA rechaza expresiones de esa longitud; acortá la consulta a los términos esenciales.`);
+    }
+    return q;
+}
 async function searchRapida(query, materia = "Todos") {
+    query = validateJubaQuery(query);
     const url = "https://juba.scba.gov.ar/Buscar.aspx";
     const resGet = await axios.get(url, {
         httpsAgent,
@@ -243,6 +259,7 @@ async function searchRapida(query, materia = "Todos") {
     return parseSumarios(resPost.data);
 }
 async function searchIntegral(opts) {
+    opts.termino = validateJubaQuery(opts.termino);
     const url = "https://juba.scba.gov.ar/Busquedas.aspx";
     const resGet = await axios.get(url, {
         httpsAgent,

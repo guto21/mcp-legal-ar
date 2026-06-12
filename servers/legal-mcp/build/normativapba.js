@@ -23,9 +23,17 @@ server.tool("buscar_normativa", "Busca normativas de la Provincia de Buenos Aire
     tipo_norma: z.string().optional().describe("Tipo de norma, ej. 'ley', 'decreto', 'resolucion', 'disposicion'."),
     numero: z.string().optional().describe("Número específico de la norma."),
     anio: z.string().optional().describe("Año de la norma (ej. 2011, 2024)."),
-    pagina: z.number().optional().default(1).describe("Página de los resultados (para paginación).")
+    pagina: z.coerce.number().int().min(1).optional().default(1).describe("Página de los resultados (para paginación). Entero >= 1.")
 }, async (args) => {
     try {
+        // Fix ronda 19 (test 28-B): valores no numericos en 'pagina' (ej. "abc")
+        // pasaban silenciosamente y el sitio devolvia la pagina 1 como si nada.
+        // Validacion defensiva en el handler ademas del z.coerce del esquema.
+        const paginaNum = Number(args.pagina ?? 1);
+        if (!Number.isInteger(paginaNum) || paginaNum < 1) {
+            return { content: [{ type: "text", text: `Error: el parámetro 'pagina' debe ser un número entero mayor o igual a 1 (recibido: ${JSON.stringify(args.pagina)}).` }], isError: true };
+        }
+        args.pagina = paginaNum;
         const params = new URLSearchParams();
         if (args.frase_exacta)
             params.append("q[phrase]", args.frase_exacta);
