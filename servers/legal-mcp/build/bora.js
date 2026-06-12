@@ -281,6 +281,54 @@ export async function obtenerSumarioSeccion(args) {
     const fechaRaw = args.fecha || getArgentinaTodayString();
     const fecha = normalizeDateToYYYYMMDD(fechaRaw);
     const url = `https://www.boletinoficial.gob.ar/seccion/${args.seccion}/${fecha}`;
+    // FIX 2026-06-12 (ronda 21): el HTML inicial de la pagina de seccion trae
+    // solo el primer tramo (~80 items de ~415 en la Segunda Seccion del
+    // 12/06); el resto carga lazy via XHR, por lo que el scrape clasico
+    // TRUNCABA el sumario antes de llegar a los rubros judiciales.
+    // Para la Segunda Seccion se reusa el barrido del buscador con texto
+    // vacio acotado a la fecha (validado en ronda 20: devuelve la edicion
+    // completa, con la etiqueta de rubro en details[0]/"norma"). Primera y
+    // tercera conservan el scrape: alli details[0] NO es el rubro y no esta
+    // verificado que trunquen. Si el barrido no trae nada, cae al scrape.
+    if (args.seccion === "segunda") {
+        try {
+            const fechaDDMM = normalizeDateToDDMMYYYY(fecha);
+            const itemsBarrido = [];
+            let paginaBarrido = 1;
+            const MAX_PAGINAS_BARRIDO = 25;
+            while (paginaBarrido <= MAX_PAGINAS_BARRIDO) {
+                const lote = await buscarAvisos({
+                    criterio: "",
+                    seccion: [2],
+                    fechaDesde: fechaDDMM,
+                    fechaHasta: fechaDDMM,
+                    pagina: paginaBarrido
+                });
+                if (lote.length === 0)
+                    break;
+                for (const r of lote) {
+                    itemsBarrido.push({
+                        rubro: r.norma || "Sin rubro",
+                        seccion: r.seccion,
+                        idAviso: r.idAviso,
+                        fecha: r.fecha,
+                        titulo: r.titulo,
+                        norma: r.norma,
+                        extracto: r.extracto,
+                        urlDetalle: r.urlDetalle,
+                        urlPdf: r.urlPdf
+                    });
+                }
+                paginaBarrido++;
+            }
+            if (itemsBarrido.length > 0) {
+                return { fecha, seccion: args.seccion, url, items: itemsBarrido };
+            }
+        }
+        catch (_e) {
+            // el barrido fallo: se continua con el scrape clasico
+        }
+    }
     const response = await axios.get(url, {
         headers: {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -568,9 +616,11 @@ export function registerAllTools(server) {
         }
     });
     // Tool 3: obtener_sumario_seccion
-    server.tool("obtener_sumario_seccion", "Obtiene el sumario de avisos publicados en una sección específica para una fecha dada, ordenados por rubro/tema.", {
+    server.tool("obtener_sumario_seccion", "Obtiene el sumario de avisos publicados en una sección específica para una fecha dada, ordenados por rubro/tema. Paginado: la Segunda Sección completa ronda los 400 avisos; use 'pagina' para recorrerla.", {
         seccion: z.string().describe("Sección a consultar: 'primera' (Legislación), 'segunda' (Sociedades), 'tercera' (Licitaciones), 'cuarta' (Marcas)"),
-        fecha: stringOrNumberOptional.describe("Fecha a consultar en formato YYYYMMDD (ej. '20171229'). Si se omite, se asume la fecha de hoy en Argentina.")
+        fecha: stringOrNumberOptional.describe("Fecha a consultar en formato YYYYMMDD (ej. '20171229'). Si se omite, se asume la fecha de hoy en Argentina."),
+        pagina: z.number().optional().default(1).describe("Página del sumario a mostrar (entero >= 1)."),
+        items_por_pagina: z.number().optional().default(100).describe("Avisos por página (1-200, default 100).")
     }, async (args) => {
         try {
             const sumario = await obtenerSumarioSeccion(args);
@@ -582,22 +632,40 @@ export function registerAllTools(server) {
                         }]
                 };
             }
-            // Group items by Rubro
+            // Paginacion del render (fix ronda 21: la segunda seccion completa
+            // ya no esta truncada y puede superar los 400 avisos).
+            const porPagina = Math.min(Math.max(Number(args.items_por_pagina) || 100, 1), 200);
+            const paginaNum = Math.max(Number(args.pagina) || 1, 1);
+            const totalItems = sumario.items.length;
+            const totalPaginas = Math.max(Math.ceil(totalItems / porPagina), 1);
+            const desde = (paginaNum - 1) * porPagina;
+            const slice = sumario.items.slice(desde, desde + porPagina);
+            // Group items by Rubro (sobre la pagina solicitada; los items
+            // vienen ordenados por rubro desde el origen)
             const grouped = {};
-            sumario.items.forEach(item => {
+            slice.forEach(item => {
                 if (!grouped[item.rubro])
                     grouped[item.rubro] = [];
                 grouped[item.rubro].push(item);
             });
             let md = `# Boletín Oficial - Sumario de la Sección ${args.seccion.toUpperCase()}\n\n`;
             md += `*   **Fecha de Edición:** ${sumario.fecha.substring(6, 8)}/${sumario.fecha.substring(4, 6)}/${sumario.fecha.substring(0, 4)}\n`;
-            md += `*   **URL Oficial:** [Ver Portada en BORA](${sumario.url})\n\n`;
-            md += `--- \n\n`;
+            md += `*   **URL Oficial:** [Ver Portada en BORA](${sumario.url})\n`;
+            md += `*   **Total de avisos:** ${totalItems} | **Página:** ${paginaNum} de ${totalPaginas} (mostrando ${slice.length})\n`;
+            if (paginaNum < totalPaginas)
+                md += `*   *Hay más avisos: repita la consulta con pagina=${paginaNum + 1}.*\n`;
+            md += `\n--- \n\n`;
+            if (slice.length === 0) {
+                md += `*La página solicitada está fuera de rango (total: ${totalPaginas} páginas).*\n`;
+                return { content: [{ type: "text", text: md }] };
+            }
             Object.keys(grouped).forEach(rubro => {
                 md += `## 📂 ${rubro}\n\n`;
                 grouped[rubro].forEach(item => {
                     md += `### 📄 ${item.titulo || "Aviso Oficial"}\n`;
-                    if (item.norma)
+                    // En la segunda seccion (items del barrido) norma === rubro:
+                    // no repetir el dato en cada aviso (fix cosmetico ronda 21)
+                    if (item.norma && item.norma !== item.rubro)
                         md += `*   **Norma:** ${item.norma}\n`;
                     if (item.extracto)
                         md += `*   **Síntesis:** ${item.extracto}\n`;
