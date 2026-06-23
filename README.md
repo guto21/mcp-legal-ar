@@ -199,7 +199,9 @@ Si ya tenías una versión anterior instalada, no hace falta desinstalar nada. E
 
 ### Opción A - Con Git instalado (recomendada)
 
-Abrir CMD o Terminal en la carpeta del repositorio y ejecutar:
+Lo más simple: doble clic en `instaladores/actualizar.bat` (Windows) o `bash instaladores/actualizar.sh` (Mac/Linux). Hace los tres pasos de abajo solo y te recuerda reiniciar Claude Desktop.
+
+Si preferís a mano, abrir CMD o Terminal en la carpeta del repositorio y ejecutar:
 
 ```
 git pull
@@ -210,6 +212,8 @@ npm install --prefix servers/legal-mcp
 Luego reiniciar Claude Desktop desde la bandeja del sistema.
 
 ### Opción B - Sin Git (descarga manual)
+
+Lo más simple: doble clic en `instaladores/actualizar-sin-git.bat` (Windows) o `bash instaladores/actualizar-sin-git.sh` (Mac/Linux). Re-descarga la última versión, reinstala dependencias y te recuerda reiniciar. Si preferís hacerlo paso a paso:
 
 1. Descargar el ZIP desde el botón verde **Code → Download ZIP**
 2. Extraer el ZIP sobreescribiendo la carpeta existente (o borrar la carpeta anterior y extraer de cero en el mismo lugar)
