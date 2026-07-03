@@ -1454,6 +1454,7 @@ export function registerAllTools(server) {
                 indice.entries.forEach((e) => {
                     out += `- **${e.label}** — \`seccion="${e.seccion}"\` — [texto](${e.url})\n`;
                 });
+                out += `\n> ⚠️ **Vigencia:** los codigos se reforman seguido y el texto consolidado de InfoLEG puede ir atras de las ultimas reformas. Antes de citar un articulo, verifica las normas modificatorias posteriores en https://www.argentina.gob.ar/normativa/nacional/${idNorma}/normas-modifican\n`;
                 return { content: [{ type: "text", text: out }] };
             }
         }
@@ -1470,6 +1471,8 @@ export function registerAllTools(server) {
             output += `* **Fuente Oficial:** [Enlace de descarga](${fetchedUrl})\n`;
             if (advertencia)
                 output += `\n> ⚠️ **Advertencia:** ${advertencia}\n`;
+            if (tipoTexto === "actualizado")
+                output += `\n> ⚠️ **Vigencia:** el texto "actualizado" de InfoLEG se consolida manualmente y puede NO incluir las reformas mas recientes (los codigos muy reformados, como el CCyCN, suelen ir atras). Antes de citar un articulo, verifica las normas modificatorias posteriores en https://www.argentina.gob.ar/normativa/nacional/${idNorma}/normas-modifican\n`;
             output += `\n## Cuerpo Normativo\n\n${cleanText}`;
             return { content: [{ type: "text", text: output }] };
         }
@@ -1504,6 +1507,10 @@ export function registerAllTools(server) {
             `1. **Selección de Variante:** Descarga y limpia el texto original o el texto consolidado actualizado.\n` +
             `2. **Rutas directas oficiales:** Genera automáticamente la ubicación del archivo en el portal del Estado.\n` +
             `3. **Lectura manual:** Permite ingresar el texto copiado de la norma en \`textoHtmlManual\` para análisis inmediato sin conexión al portal.\n\n` +
+            `## Vigencia y actualizacion (importante)\n` +
+            `- El texto "actualizado" de InfoLEG es una consolidacion MANUAL: puede no incluir las reformas mas recientes. En codigos muy reformados (ej. el CCyCN, que InfoLEG declara modificado/complementado por decenas de normas) el atraso es esperable.\n` +
+            `- No trates el texto actualizado como el texto vigente garantizado. Antes de citar un articulo, verifica las modificatorias posteriores en \`argentina.gob.ar/normativa/nacional/{idNorma}/normas-modifican\` y, para lo mas reciente, cruzalo con el Boletin Oficial (conector BORA) o con SAIJ.\n` +
+            `- El texto "original" es la publicacion inicial, sin reformas: util para ver el estado a la sancion, no el vigente.\n\n` +
             `## Aviso de Responsabilidad\n` +
             `Este conector es una herramienta tecnológica automatizada y no representa asesoramiento jurídico formal.`;
         return { content: [{ type: "text", text: output }] };
@@ -1738,6 +1745,50 @@ export function registerAllTools(server) {
                 return { content: [{ type: "text", text: error.message }], isError: true };
             }
             return { content: [{ type: "text", text: `Error al obtener metadatos: ${error.message}` }], isError: true };
+        }
+    });
+    server.tool("listar_modificatorias", "Lista las normas que MODIFICAN o COMPLEMENTAN una norma, de la mas reciente a la mas antigua. Sirve para ver que reformas podrian NO estar todavia en el texto 'actualizado' de InfoLEG (que se consolida a mano). El idNorma lo dan buscar_normativa u obtener_metadatos_norma (ej. 235975 = CCyCN, Ley 26.994).", {
+        idNorma: stringOrNumber.describe("ID de la norma en InfoLEG/argentina.gob.ar (ej. '235975')."),
+        pagina: z.number().optional().default(1).describe("Pagina de resultados (aprox. 50 por pagina). Default 1."),
+        soloLeyesYDecretos: z.boolean().optional().default(false).describe("Si true, filtra a Leyes, Decretos y DNU (las que suelen reformar el articulado del codigo), descartando resoluciones y disposiciones administrativas.")
+    }, async (args) => {
+        try {
+            const page = Math.max(1, Number(args.pagina) || 1);
+            const url = `${ARGENTINA_BASE_URL}/normativa/nacional/norma-${args.idNorma}/normas-modifican` + (page > 1 ? `?page=${page - 1}` : "");
+            const html = await fetchOfficialHtml(url);
+            const $ = cheerio.load(html);
+            const items = [];
+            $("table tr").each((_, tr) => {
+                const tds = $(tr).find("td");
+                if (tds.length < 3) return;
+                const a = $(tds[0]).find("a").first();
+                const norma = a.text().replace(/\s+/g, " ").trim();
+                if (!norma) return;
+                const href = a.attr("href") || "";
+                const organismo = $(tds[0]).text().replace(a.text(), "").replace(/\s+/g, " ").trim();
+                const fecha = $(tds[1]).text().replace(/\s+/g, " ").trim();
+                const descripcion = $(tds[2]).text().replace(/\s+/g, " ").trim().slice(0, 220);
+                items.push({ norma, organismo, fecha, descripcion, url: href.startsWith("http") ? href : `${ARGENTINA_BASE_URL}${href}` });
+            });
+            const filtrados = args.soloLeyesYDecretos
+                ? items.filter((i) => /^(ley|decreto|dnu)\b/i.test(i.norma))
+                : items;
+            if (!filtrados.length) {
+                return { content: [{ type: "text", text: `No se pudieron leer modificatorias en:\n${url}\nRevisalas directamente en esa pagina (o probá sin el filtro soloLeyesYDecretos).` }] };
+            }
+            let out = `# Normas que modifican/complementan (InfoLEG ${args.idNorma})\n\n`;
+            out += `Pagina ${page}. ${filtrados.length} resultado(s)${args.soloLeyesYDecretos ? " (solo Leyes/Decretos/DNU)" : ""}, de la mas reciente a la mas antigua.\n\n`;
+            out += `> ⚠️ Estas reformas pueden NO estar incorporadas al texto "actualizado" de InfoLEG. Verifica el articulo puntual contra la norma modificatoria antes de citar.\n\n`;
+            filtrados.forEach((i) => {
+                out += `- **${i.norma}** — B.O. ${i.fecha} — ${i.organismo}\n`;
+                if (i.descripcion) out += `  ${i.descripcion}\n`;
+                out += `  [Ver norma](${i.url})\n`;
+            });
+            out += `\n*Fuente: ${url}*`;
+            return { content: [{ type: "text", text: out }] };
+        }
+        catch (error) {
+            return { content: [{ type: "text", text: `Error al listar modificatorias: ${error.message}` }], isError: true };
         }
     });
     server.tool("obtener_urls_norma", "Construye URLs oficiales utiles para una norma: visor historico, texto original, texto actualizado y rutas de Argentina.gob.ar si se provee URL.", {
