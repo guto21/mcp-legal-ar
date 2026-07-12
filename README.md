@@ -241,8 +241,11 @@ El hub lo lee al arrancar. El `.env` es local y está en `.gitignore`: nunca se 
 
 El conector **JusCABA** funciona sin login para causas públicas. Si querés que vea además **tu cartera** ("Mis Causas") y las causas **reservadas** (penal/PCyF) donde sos parte o letrado, dale acceso de una de dos formas:
 
-- **Credenciales** (login automático): en el `.env` o en `"env"`, `EJE_USUARIO` y `EJE_CLAVE`. El conector detecta la vía según el usuario: si es **CUIT** (numérico) hace el login directo del EJE; si es **email** (como el de **miBA**) automatiza el flujo "Ingresar con miBA" por vos. `EJE_HEADLESS=1` para que no abra ventana. Si miBA pide captcha/2FA, el automático se traba y conviene el modo HITL. **Aviso:** la clave de miBA es la identidad del Gobierno de la Ciudad (da acceso a muchos servicios, no solo judiciales); guardala con cuidado.
-- **HITL** (sin guardar la clave): pedile a Claude `iniciar_hitl_browser` del EJE, te logueás en la ventana como entrás siempre (incluido miBA), y usás `mis_causas`. Tu clave no pasa por el conector.
+- **Credenciales** (login automático): en el `.env` o en `"env"`, `EJE_USUARIO` y `EJE_CLAVE`, más `EJE_LOGIN` para elegir la vía (el EJE tiene las dos):
+  - `EJE_LOGIN=directo` → login directo del EJE con **CUIT/CUIL + clave local** (el botón "Ingresar"). Es el más rápido: no abre navegador.
+  - `EJE_LOGIN=miba` → automatiza **"Ingresar con miBA"** (identidad del GCBA). `EJE_USUARIO` es tu email o CUIL de miBA. Abre el navegador; `EJE_HEADLESS=1` lo oculta. Si miBA pide captcha/2FA, el automático se traba y conviene el HITL. **Aviso:** la clave de miBA es la identidad del Gobierno de la Ciudad (da acceso a muchos servicios, no solo judiciales); guardala con cuidado.
+  - sin `EJE_LOGIN` → automático: si `EJE_USUARIO` es un email usa miBA; si es numérico, directo.
+- **HITL** (sin guardar la clave): pedile a Claude `iniciar_hitl_browser` del EJE, te logueás en la ventana como entrás siempre (directo o miBA), y usás `mis_causas`. Tu clave no pasa por el conector.
 
 Sin ninguna de las dos, el JusCABA sigue funcionando en modo público (solo causas públicas).
 

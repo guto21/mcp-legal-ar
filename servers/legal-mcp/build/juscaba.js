@@ -29,16 +29,16 @@ const HEADERS = {
 };
 
 // ---------------------------------------------------------------------------
-// AUTENTICACION (opcional) - DOS MODOS, para ver "Mis Causas" y reservadas.
-//   A) CREDENCIALES por entorno: EJE_USUARIO (CUIT sin guiones) + EJE_CLAVE ->
-//      Keycloak grant_type=password (realm IOL-CABA, client publico iol-ui). SOLO
-//      sirve para login DIRECTO del EJE con CUIT. Si el abogado entra por "Ingresar
-//      con MIBA" (identidad federada del GCBA, usuario = email), este modo NO aplica:
-//      usar el modo B. Por eso solo se toma como valido un EJE_USUARIO numerico (CUIT).
-//   B) HITL: iniciar_hitl_browser abre una ventana donde el usuario se loguea en
-//      el EJE (por MIBA o directo, como sea); el conector captura el Bearer que emite
-//      la propia SPA. La clave no pasa por el conector. Es el modo que sirve para MIBA.
-//   Sin ninguno de los dos, el conector sigue en modo PUBLICO (solo causas publicas).
+// AUTENTICACION (opcional) - para ver "Mis Causas" y reservadas. El EJE tiene DOS
+// formas de login y el usuario ELIGE con la env EJE_LOGIN (directo | miba | auto):
+//   - directo: EJE_USUARIO (CUIT/CUIL) + EJE_CLAVE (clave LOCAL del EJE) -> Keycloak
+//     grant_type=password (realm IOL-CABA, client iol-ui). No abre navegador.
+//   - miba: "Ingresar con miBA" (identidad del GCBA). EJE_USUARIO = email o CUIL de
+//     miBA; el conector automatiza ese login por navegador (headless con EJE_HEADLESS=1).
+//   - auto (default): infiere por el formato de EJE_USUARIO (email -> miba; numerico
+//     -> directo).
+// Ademas, iniciar_hitl_browser da el login MANUAL en una ventana para cualquiera de las
+// dos formas (la clave no pasa por el conector). Sin nada, el conector es PUBLICO.
 // El token vive solo en memoria. .env / bloque "env" del JSON para el modo A.
 // ---------------------------------------------------------------------------
 const EJE_AUTH_URL = process.env.EJE_AUTH_URL || "https://eje.juscaba.gob.ar/auth";
@@ -51,18 +51,23 @@ let _ejeTok = null;                 // { access, refresh, accessExp, refreshExp 
 let _ejeBrowser = null, _ejePage = null; // HITL
 let _ejeHitlToken = { token: null, ts: 0 }; // Bearer capturado de la SPA (HITL)
 
-// El login del EJE tiene DOS formas: (1) directo Keycloak con CUIT + clave local
-// (grant_type=password), (2) "Ingresar con miBA" (identidad del GCBA, usuario =
-// email). Segun el formato de EJE_USUARIO se elige la via:
-//   - EJE_USUARIO numerico (CUIT) -> grant password directo.
-//   - EJE_USUARIO con @ (email)   -> auto-login por navegador contra miBA.
+// El login del EJE tiene DOS formas propias, y el usuario ELIGE cual con EJE_LOGIN:
+//   EJE_LOGIN=directo -> Keycloak con CUIT/CUIL + clave LOCAL del EJE (grant_type=password).
+//   EJE_LOGIN=miba    -> "Ingresar con miBA" (identidad del GCBA); usuario = email o CUIL,
+//                        clave de miBA; el conector automatiza ese login por navegador.
+//   EJE_LOGIN=auto (default o sin setear) -> infiere por el formato de EJE_USUARIO:
+//                        con @ (email) = miBA; solo numerico (CUIT) = directo.
+// (Ademas del modo credenciales, iniciar_hitl_browser da el login manual en cualquier caso.)
+const ejeLoginModo = () => (process.env.EJE_LOGIN || "auto").trim().toLowerCase();
+const hayEjeUserPass = () => !!(process.env.EJE_USUARIO && process.env.EJE_CLAVE);
 const ejeUsuarioEsCuit = () => {
     const u = (process.env.EJE_USUARIO || "").trim();
     return /^[\d.\-]+$/.test(u) && u.replace(/\D/g, "").length >= 8;
 };
 const ejeUsuarioEsMiba = () => /@/.test((process.env.EJE_USUARIO || "").trim());
-const hayCredencialesEjeCuit = () => !!(ejeUsuarioEsCuit() && process.env.EJE_CLAVE);
-const hayCredencialesEjeMiba = () => !!(ejeUsuarioEsMiba() && process.env.EJE_CLAVE);
+// Metodo efectivo segun EJE_LOGIN (explicito) o la heuristica (auto).
+const hayCredencialesEjeCuit = () => hayEjeUserPass() && (ejeLoginModo() === "directo" || (ejeLoginModo() === "auto" && ejeUsuarioEsCuit()));
+const hayCredencialesEjeMiba = () => hayEjeUserPass() && (ejeLoginModo() === "miba" || (ejeLoginModo() === "auto" && ejeUsuarioEsMiba()));
 const hayCredencialesEje = () => hayCredencialesEjeCuit() || hayCredencialesEjeMiba();
 // Navegador oculto para el auto-login miBA (EJE_HEADLESS=1). Default visible, por si
 // miBA pide captcha/2FA: ahi el usuario ve la ventana y destraba.
@@ -496,8 +501,9 @@ export function registerAllTools(server) {
             const info = {
                 fuente: "Justicia de la Ciudad de Buenos Aires - EJE (Expediente Judicial Electronico)",
                 portal: "https://eje.juscaba.gob.ar/iol-ui/",
-                acceso: "Consulta PUBLICA sin login (causas publicas). OPCIONAL: capa AUTENTICADA para ver 'Mis Causas' (cartera del abogado) y las causas reservadas. Dos modos de login: A) EJE_USUARIO (CUIT) + EJE_CLAVE por entorno (.env o env del JSON); B) HITL con iniciar_hitl_browser (la clave no pasa por el conector).",
-                modoActivo: hayCredencialesEje() ? "AUTENTICADO A - credenciales de entorno" : (ejePageViva() ? "AUTENTICADO B - HITL (navegador abierto)" : "PUBLICO (sin sesion)"),
+                acceso: "Consulta PUBLICA sin login (causas publicas). OPCIONAL: capa AUTENTICADA para ver 'Mis Causas' y reservadas. El login del EJE tiene dos vias, elegis con EJE_LOGIN: 'directo' (CUIT/CUIL + clave local del EJE) o 'miba' (Ingresar con miBA; el conector lo automatiza). Sin EJE_LOGIN, se infiere por el formato de EJE_USUARIO. Alternativa manual siempre disponible: iniciar_hitl_browser (la clave no pasa por el conector).",
+                loginConfigurado: process.env.EJE_LOGIN || "auto (segun formato de EJE_USUARIO)",
+                modoActivo: hayCredencialesEjeCuit() ? "AUTENTICADO - directo (CUIT/CUIL + clave EJE)" : (hayCredencialesEjeMiba() ? "AUTENTICADO - miBA (auto-login)" : (ejePageViva() ? "AUTENTICADO - HITL (navegador)" : "PUBLICO (sin sesion)")),
                 sesionAutenticada: modoAutenticado(),
                 cubre: [
                     "Busqueda de causas por parte, numero, CUIJ o caratula (tipoBusqueda CAU).",
