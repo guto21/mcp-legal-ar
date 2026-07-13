@@ -310,8 +310,10 @@ const DIRECTIVA_OPERATIVA = [
     "- Normas: verificar vigencia. Nacional -> InfoLEG; Provincia de Buenos Aires -> NormativaPBA; otra provincia sin conector -> NO VERIFICADO.",
     "- Citas provinciales: incluir el Departamento Judicial.",
     "- Separar datos extraidos de inferencias. Marcar dudas y fuentes caidas como NO VERIFICADO; el silencio de una herramienta no es 'sin novedades'.",
+    "- Estado de confianza de cada dato del borrador: VERIFICADO | REFERENCIA VERIFICADA (ficha sin texto leido) | INFERIDO | NO VERIFICADO (PARCIAL) | NO VERIFICADO | CONFLICTO.",
     "- Anonimizar datos personales antes de resumir PDFs de expedientes.",
     "- No redactar la conclusion profesional final: entregar un borrador revisable por el abogado.",
+    "Directiva operativa completa y metodologia (estados de confianza, verificacion minima, matriz de omisiones, anonimizacion, registro): ver docs/directiva-operativa.md y docs/busqueda-jurisprudencia-doctrina.md.",
 ].join("\n");
 
 // ---------------------------------------------------------------------------

@@ -95,8 +95,10 @@ La doctrina de autores se incorpora para consolidar la interpretación de la nor
 | Estado | Criterio operativo | Acción requerida |
 | --- | --- | --- |
 | VERIFICADO | El dato (fecha, articulado, holding, nombres) fue extraído del documento fuente oficial, leído e integrado. | Apto para incorporación en el escrito definitivo. |
+| REFERENCIA VERIFICADA / CONTENIDO NO LEÍDO | La cita existe y se confirmó su ficha (autor, título, carátula o número), pero el texto no se recuperó ni se leyó. Típico de doctrina de la que solo se tiene la ficha bibliográfica, o de un fallo ubicado sin acceso al texto íntegro. | No se usa como fundamento. Leer el texto completo antes de citar. |
 | INFERIDO | Deducción o conclusión jurídica del modelo a partir del fallo, no afirmación explícita del tribunal. | Revisión humana obligatoria para convalidar el criterio. |
-| NO VERIFICADO | Datos que no surgen de las herramientas del MCP, fallos sin acceso a texto completo, o normas provinciales sin conector. | Prohibido su uso como afirmación. Comprobación manual. |
+| NO VERIFICADO (PARCIAL) | Verificación degradada: una herramienta del MCP cayó y el dato se recuperó por una vía indirecta (por ejemplo, voces del tesauro tomadas de la doctrina porque `suggest_terms` no respondió). | Marcar la limitación en el borrador. Compulsa directa de lo que quedó sin confirmar. |
+| NO VERIFICADO | Datos que no surgen de las herramientas del MCP, fallos sin acceso a texto completo, coincidencias de texto libre no leídas o no pertinentes, o normas provinciales sin conector. | Prohibido su uso como afirmación. Comprobación manual. |
 | CONFLICTO | Dos o más fuentes oficiales devuelven datos contradictorios sobre la vigencia de una norma o de un fallo. | Bloqueo del argumento. Compulsa directa antes de avanzar. |
 
 ### Matriz de control de omisiones materiales
