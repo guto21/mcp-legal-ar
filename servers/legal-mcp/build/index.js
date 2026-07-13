@@ -306,6 +306,7 @@ const DIRECTIVA_OPERATIVA = [
     "Directiva de uso profesional (mcp-legal-ar). Fuentes juridicas argentinas para asistir al abogado; no reemplazan su revision.",
     "- No afirmar nada que no surja de una consulta verificada a estas fuentes. No inventar ni completar citas, fechas, salas ni caratulas.",
     "- Jurisprudencia: citar solo tras recuperar y leer el fallo completo, no el sumario. Distinguir holding de obiter y mayoria de disidencia. Verificar firmeza: si esta recurrido, es criterio, no cosa juzgada.",
+    "- Doctrina: la ficha bibliografica no es la obra leida. Si solo consta la referencia (autor, titulo, editorial), no se usa como fundamento hasta leer el texto.",
     "- Normas: verificar vigencia. Nacional -> InfoLEG; Provincia de Buenos Aires -> NormativaPBA; otra provincia sin conector -> NO VERIFICADO.",
     "- Citas provinciales: incluir el Departamento Judicial.",
     "- Separar datos extraidos de inferencias. Marcar dudas y fuentes caidas como NO VERIFICADO; el silencio de una herramienta no es 'sin novedades'.",
