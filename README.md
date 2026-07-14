@@ -74,7 +74,7 @@ Claude Desktop
 
 El hub acerca fuentes oficiales, no reemplaza la revisión del abogado. La directiva operativa de uso (estados de confianza, verificación antes de citar, anonimización) viaja en el propio código y se expone vía `instructions` del MCP: se carga sola al conectar, no hace falta leer un archivo aparte.
 
-El método completo está en la guía [Búsqueda de jurisprudencia y doctrina](docs/busqueda-jurisprudencia-doctrina.md): de las voces al fallo, control de vigencia y firmeza, y cómo llevar el hallazgo a la pieza.
+Esa misma directiva, en versión legible y ampliada, está en [`docs/directiva-operativa.md`](docs/directiva-operativa.md): la capa corta de control -regla de integridad, estados de confianza (VERIFICADO, REFERENCIA VERIFICADA, INFERIDO, NO VERIFICADO PARCIAL, NO VERIFICADO, CONFLICTO), verificación mínima antes de citar, matriz de omisiones, anonimización y registro-. El método completo -de las voces al fallo, control de vigencia y firmeza, y cómo llevar el hallazgo a la pieza- está en [`docs/busqueda-jurisprudencia-doctrina.md`](docs/busqueda-jurisprudencia-doctrina.md).
 
 ---
 
@@ -201,27 +201,40 @@ El archivo completo debería quedar así (ejemplo Windows):
 
 > **Windows:** usar doble barra invertida `\\` en todas las rutas del JSON. **Mac/Linux:** usar barra simple `/`. La carpeta puede llamarse como quieras; lo que importa es que la ruta en `args` apunte al `servers/legal-mcp/build/index.js` de donde extrajiste el repositorio.
 
-#### Acceso al conector MEV (opcional)
+#### Conectores con login: Portal PJN, JusCABA (EJE) y MEV (opcional)
 
-El conector **MEV** (Mesa de Entradas Virtual de la SCBA) es el único que necesita que te loguees, porque la MEV no tiene consulta anónima. Tiene **dos modos**, elegís uno:
+De los 15 conectores, **12 consultan fuentes públicas y no necesitan ninguna configuración**. Solo **3 involucran TU login**, porque acceden a TUS expedientes:
 
-**Modo A - HITL (sin guardar la clave).** No configurás nada. Cuando uses una tool del MEV, pedile a Claude que abra el navegador (`iniciar_hitl_browser`): se abre una ventana de Chromium en la MEV donde te logueás a mano (Chrome autocompleta con tu gestor de contraseñas). El conector toma la sesión del navegador; tu clave nunca pasa por él ni se guarda en ningún archivo. Es como funciona el conector del Portal PJN. Ideal para uso interactivo desde Claude Desktop.
+- **Portal PJN (Nación)** - feed de novedades de tus causas. Conector `portalpjn`. Ojo con el nombre: los otros dos conectores de PJN (PJN Consulta y PJN Jurisprudencia) son **públicos** y NO usan usuario/clave; ahí el captcha lo resolvés a mano en la ventana. El usuario y clave del PJN son solo para este, el Portal.
+- **JusCABA / EJE (Ciudad)** - conector `juscaba`. Anda sin login para causas públicas; el login es solo para ver **"Mis Causas"** y las **reservadas** (penal/PCyF) donde sos parte o letrado.
+- **MEV (Provincia de Buenos Aires)** - conector `mev`. La Mesa de Entradas Virtual **no tiene consulta anónima**: siempre necesita login.
 
-**Modo B - credenciales (login automático).** Si preferís que entre solo, sin abrir ventana, hay dos formas de darle las credenciales:
+**Cada uno se puede configurar de dos formas:**
 
-*Forma fácil - archivo `.env`* (recomendada): creá un archivo llamado `.env` en la raíz del repo (`mcp-legal-ar\.env`) con una línea por dato, y listo. No hay que tocar el JSON de Claude Desktop:
+- **HITL (sin guardar la clave).** No configurás nada. Le pedís a Claude que abra el navegador (`iniciar_hitl_browser`), te logueás a mano en la ventana y el conector toma esa sesión. Tu clave nunca pasa por el conector ni se guarda. Ideal para uso interactivo.
+- **Credenciales (login automático).** Cargás usuario y clave una vez y el conector entra solo, sin abrir ventana. Van en un archivo `.env` en la raíz del repo (recomendado) o en un bloque `"env"` del JSON de Claude Desktop. En ambos casos la clave queda en texto plano en tu máquina: protegé el archivo.
+
+**Archivo `.env` completo.** Creá `mcp-legal-ar\.env` (una línea por dato) y poné solo los conectores que uses:
 
 ```
+# --- MEV (Provincia de Buenos Aires / SCBA) ---
 MEV_USUARIO=tu_usuario_mev
 MEV_CLAVE=tu_clave_mev
-MEV_DEPTO_REGISTRADO=aa
+MEV_DEPTO_REGISTRADO=aa          # depto donde registraste el usuario; aa = Todos los Deptos
+
+# --- JusCABA / EJE (Ciudad) ---
+EJE_USUARIO=tu_cuit_o_email      # CUIT/CUIL para login directo; email o CUIL para miBA
+EJE_CLAVE=tu_clave
+EJE_LOGIN=directo                # directo = CUIT + clave local del EJE | miba = "Ingresar con miBA"
+# EJE_HEADLESS=1                 # (solo miba) no abrir la ventana del navegador
+
+# --- Portal PJN (Nación) ---
 PJN_USER=tu_usuario_pjn
 PJN_PASS=tu_clave_pjn
+# PJN_HEADLESS=1                 # no abrir ventana (uso desatendido)
 ```
 
-El hub lo lee al arrancar. El `.env` es local y está en `.gitignore`: nunca se sube. Es el mismo formato que usa el resto del stack.
-
-*Forma alternativa - bloque `"env"` en el JSON.* Si preferís, agregá tus datos como variables de entorno dentro de la config de Claude Desktop con `"env"`:
+El `.env` es local y está en `.gitignore`: nunca se sube. El hub lo lee al arrancar. Si preferís el JSON de Claude Desktop, poné los mismos nombres dentro de `"env"`:
 
 ```json
 "mcp-legal-ar": {
@@ -230,37 +243,34 @@ El hub lo lee al arrancar. El `.env` es local y está en `.gitignore`: nunca se 
   "env": {
     "MEV_USUARIO": "tu_usuario_mev",
     "MEV_CLAVE": "tu_clave_mev",
-    "MEV_DEPTO_REGISTRADO": "aa"
+    "MEV_DEPTO_REGISTRADO": "aa",
+    "EJE_USUARIO": "tu_cuit_o_email",
+    "EJE_CLAVE": "tu_clave",
+    "EJE_LOGIN": "directo",
+    "PJN_USER": "tu_usuario_pjn",
+    "PJN_PASS": "tu_clave_pjn"
   }
 }
 ```
 
-`MEV_DEPTO_REGISTRADO` es el departamento donde registraste tu usuario MEV; `aa` = "Todos los Deptos" (lo habitual). En este modo la clave queda en texto plano en el config local de tu máquina: protegé ese archivo y no lo compartas. La MEV fuerza el cambio de clave cada 90 días: cuando eso pase, actualizá `MEV_CLAVE` acá. Si no configurás nada, los demás 14 conectores funcionan igual y el MEV usa el modo A.
+**Resumen:**
 
-#### Acceso al conector EJE / JusCABA (opcional)
+| Conector | Cuándo necesita login | Variables | Vías |
+|---|---|---|---|
+| Portal PJN (`portalpjn`) | para el feed de novedades | `PJN_USER`, `PJN_PASS` (+ `PJN_HEADLESS`) | credenciales o HITL (SSO). El SSO a veces pide captcha/2FA que el automático no resuelve |
+| JusCABA / EJE (`juscaba`) | solo para "Mis Causas" y reservadas | `EJE_USUARIO`, `EJE_CLAVE`, `EJE_LOGIN` (+ `EJE_HEADLESS`) | `EJE_LOGIN=directo` (CUIT + clave local) o `miba` (identidad GCBA); sin la variable, autodetecta por el formato del usuario; o HITL |
+| MEV (`mev`) | siempre (no hay consulta anónima) | `MEV_USUARIO`, `MEV_CLAVE`, `MEV_DEPTO_REGISTRADO` | credenciales o HITL |
 
-El conector **JusCABA** funciona sin login para causas públicas. Si querés que vea además **tu cartera** ("Mis Causas") y las causas **reservadas** (penal/PCyF) donde sos parte o letrado, dale acceso de una de dos formas:
+**Detalle por conector:**
 
-- **Credenciales** (login automático): en el `.env` o en `"env"`, `EJE_USUARIO` y `EJE_CLAVE`, más `EJE_LOGIN` para elegir la vía (el EJE tiene las dos):
-  - `EJE_LOGIN=directo` → login directo del EJE con **CUIT/CUIL + clave local** (el botón "Ingresar"). Es el más rápido: no abre navegador.
-  - `EJE_LOGIN=miba` → automatiza **"Ingresar con miBA"** (identidad del GCBA). `EJE_USUARIO` es tu email o CUIL de miBA. Abre el navegador; `EJE_HEADLESS=1` lo oculta. Si miBA pide captcha/2FA, el automático se traba y conviene el HITL. **Aviso:** la clave de miBA es la identidad del Gobierno de la Ciudad (da acceso a muchos servicios, no solo judiciales); guardala con cuidado.
-  - sin `EJE_LOGIN` → automático: si `EJE_USUARIO` es un email usa miBA; si es numérico, directo.
-- **HITL** (sin guardar la clave): pedile a Claude `iniciar_hitl_browser` del EJE, te logueás en la ventana como entrás siempre (directo o miBA), y usás `mis_causas`. Tu clave no pasa por el conector.
+- **MEV.** `MEV_DEPTO_REGISTRADO=aa` es "Todos los Deptos" (lo habitual). La MEV fuerza cambio de clave cada 90 días: cuando pase, actualizá `MEV_CLAVE`.
+- **JusCABA / EJE.** El EJE tiene DOS formas de login y elegís con `EJE_LOGIN`:
+  - `directo` → CUIT/CUIL + la clave **local del EJE** (el botón "Ingresar"). Es el más rápido: no abre navegador. `EJE_USUARIO` es tu CUIT.
+  - `miba` → automatiza **"Ingresar con miBA"** (identidad del GCBA). `EJE_USUARIO` es tu email o CUIL de miBA; abre navegador (`EJE_HEADLESS=1` lo oculta). Si miBA pide captcha/2FA, el automático se traba y conviene el HITL. Aviso: la clave de miBA abre muchos servicios del Gobierno de la Ciudad, no solo judiciales; cuidala.
+  - sin `EJE_LOGIN` → autodetecta: si `EJE_USUARIO` tiene arroba, miBA; si es numérico, directo.
+- **Portal PJN.** La clave del PJN es la llave a **todos** tus expedientes. Para uso desatendido real, `PJN_HEADLESS=1`. Si el SSO pide captcha/2FA, el automático completa usuario/clave pero destrabás vos en la ventana.
 
-Sin ninguna de las dos, el JusCABA sigue funcionando en modo público (solo causas públicas).
-
-#### Acceso al conector Portal PJN (opcional)
-
-El conector **Portal PJN** (feed de novedades del abogado) también tiene los dos modos. Por default es HITL: le pedís a Claude `iniciar_hitl_browser`, te logueás en el SSO y listo (tu clave nunca pasa por el conector). Si preferís login automático sin abrir ventana, agregá `PJN_USER` y `PJN_PASS` al mismo bloque `"env"`:
-
-```json
-"env": {
-  "PJN_USER": "tu_usuario_pjn",
-  "PJN_PASS": "tu_clave_pjn"
-}
-```
-
-Aviso importante: la clave del PJN es la llave a **todos** tus expedientes y queda en texto plano en el config local. Además, el SSO del PJN a veces pide captcha o segundo factor, que el login automático no puede resolver — en ese caso se completa el usuario/clave y tenés que destrabar vos en la ventana. Para que el navegador no se abra (uso desatendido real), agregá `"PJN_HEADLESS": "1"`. Si no configurás nada, el PJN usa el modo HITL normal.
+Si no configurás nada, los 12 conectores públicos funcionan igual, JusCABA queda en modo público y Portal PJN y MEV usan HITL cuando los llames.
 
 ### Paso 4 - Reiniciar Claude Desktop
 
