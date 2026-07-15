@@ -18,6 +18,11 @@ diagnose-output.txt
 .env
 .env.*
 
+# Secretos de Cloudflare Workers (wrangler dev) - NUNCA versionar
+.dev.vars
+**/.dev.vars
+*.dev.vars
+
 # Sistema operativo
 .DS_Store
 Thumbs.db
