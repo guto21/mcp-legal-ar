@@ -139,6 +139,23 @@ const CONNECTORS = [
     { prefix: "mev",          command: NODE, args: [path.join(LEGAL_MCP, "build", "mev.js")],          cwd: LEGAL_MCP },
 ];
 
+// ---------------------------------------------------------------------------
+// Seleccion de conectores (MCP_LEGAL_CONNECTORS)
+// ---------------------------------------------------------------------------
+// Los 15 conectores exponen ~220 tools. Algunos clientes MCP truncan la lista
+// cuando un servidor expone demasiadas: el sintoma es que "faltan siempre las
+// mismas" tools en el chat aunque el log diga que cargaron bien.
+// Con esta variable, cada abogado levanta solo los conectores de su practica:
+//   MCP_LEGAL_CONNECTORS=infoleg,juba,saij,csjn
+// Va en el .env de la raiz o en el bloque "env" de claude_desktop_config.json.
+// Sin la variable (o vacia) se levantan los 15, como siempre.
+const SOLO = (process.env.MCP_LEGAL_CONNECTORS || "")
+    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+const DESCONOCIDOS = SOLO.filter((p) => !CONNECTORS.some((c) => c.prefix === p));
+const CONNECTORS_ACTIVOS = SOLO.length
+    ? CONNECTORS.filter((c) => SOLO.includes(c.prefix))
+    : CONNECTORS;
+
 class ChildMcpClient {
     prefix;
     config;
@@ -327,10 +344,17 @@ async function main() {
 
     process.stderr.write("[mcp-legal-ar] iniciando conectores...\n");
     process.stderr.write(`[mcp-legal-ar] ROOT: ${ROOT}\n`);
+    if (SOLO.length) {
+        process.stderr.write(`[mcp-legal-ar] MCP_LEGAL_CONNECTORS activo: ${CONNECTORS_ACTIVOS.map((c) => c.prefix).join(", ") || "(ninguno)"}\n`);
+        if (DESCONOCIDOS.length)
+            process.stderr.write(`[mcp-legal-ar] AVISO: prefijos desconocidos en MCP_LEGAL_CONNECTORS, se ignoran: ${DESCONOCIDOS.join(", ")}\n`);
+        if (!CONNECTORS_ACTIVOS.length)
+            process.stderr.write(`[mcp-legal-ar] AVISO: ningun conector coincide; revisar MCP_LEGAL_CONNECTORS (prefijos validos: ${CONNECTORS.map((c) => c.prefix).join(", ")})\n`);
+    }
 
     const clients = [];
     await Promise.allSettled(
-        CONNECTORS.map(async (cfg) => {
+        CONNECTORS_ACTIVOS.map(async (cfg) => {
             const client = new ChildMcpClient(cfg.prefix, cfg);
             try {
                 await client.initialize();
