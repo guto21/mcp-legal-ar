@@ -335,6 +335,29 @@ Verificar que Node.js esté instalado correctamente ejecutando `node --version` 
 
 Algunos conectores dependen de que las webs oficiales estén disponibles. Si una fuente está caída, el resto sigue funcionando normalmente.
 
+**Faltan conectores o tools en el chat, aunque el log diga que cargaron bien**
+
+Los 15 conectores exponen unas 220 tools. Algunos clientes MCP truncan la lista cuando un servidor expone demasiadas: el síntoma típico es que "faltan siempre las mismas" (por ejemplo JUBA, BORA, InfoLEG, PTN) y no aparecen ni buscables ni invocables, aunque el log del hub diga `listo - 15 conectores, ~220 tools`.
+
+Primero, confirmar dónde está el corte. En los logs MCP de Claude Desktop, buscar la última línea del arranque:
+
+```
+[mcp-legal-ar] listo - N conectores, M tools totales
+```
+
+- Si dice **15 conectores** y en el chat ves menos: es truncamiento del cliente.
+- Si dice **menos de 15**: algún conector falló al iniciar, y arriba figuran los `[prefijo] ERROR al inicializar: ...` con el motivo (lo más común: no haber corrido `npm install` en las dos carpetas de `servers/`).
+
+Para el truncamiento, la solución es levantar solo los conectores que usás, con la variable `MCP_LEGAL_CONNECTORS` (en el `.env` de la raíz o en el bloque `"env"` del config):
+
+```
+MCP_LEGAL_CONNECTORS=infoleg,juba,saij,csjn
+```
+
+Prefijos válidos: `bora`, `bopba`, `infoleg`, `normativapba`, `juba`, `pjn`, `pjnjuris`, `ptn`, `tfn`, `saij`, `scba`, `portalpjn`, `juscaba`, `csjn`, `mev`.
+
+Así el abogado de fuero provincial levanta 4 o 5 conectores (unas 60 tools) y el hub deja de superar el límite del cliente. Sin la variable, se levantan los 15 como siempre. Al arrancar, el log confirma cuáles quedaron activos.
+
 ---
 
 ## Fuentes disponibles
